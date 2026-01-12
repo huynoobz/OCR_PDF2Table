@@ -444,3 +444,92 @@ class PDFImageProcessor:
         # Combine
         mask = cv2.bitwise_or(horizontal_lines, vertical_lines)
         return mask
+
+    @staticmethod
+    def detect_table_cells_mask(
+        img_array: np.ndarray,
+        *,
+        adaptive_block_size: int = 15,
+        adaptive_c: int = 2,
+        horizontal_kernel_len: Optional[int] = None,
+        vertical_kernel_len: Optional[int] = None,
+        kernel_scale: int = 30,
+        # filtering params (line stage)
+        filter_non_table_lines: bool = True,
+        min_intersections_per_component: int = 2,
+        min_component_length_px: int = 50,
+        intersection_dilate_px: int = 3,
+        # cell stage params
+        line_dilate_px: int = 3,
+        min_cell_area_px: int = 200,
+        max_cell_area_ratio: float = 0.90,
+        min_cell_width_px: int = 10,
+        min_cell_height_px: int = 10,
+    ) -> np.ndarray:
+        """
+        Detect table cell interiors and return a binary mask (uint8: 0/255).
+
+        Approach:
+        - Detect table lines (using detect_table_lines, optionally filtered by intersections)
+        - Dilate lines to close small gaps
+        - Invert lines within the table bounding box to get candidate regions
+        - Connected components → keep components that look like cell interiors
+          (exclude background/huge component, tiny noise)
+        """
+        line_mask = PDFImageProcessor.detect_table_lines(
+            img_array,
+            adaptive_block_size=adaptive_block_size,
+            adaptive_c=adaptive_c,
+            horizontal_kernel_len=horizontal_kernel_len,
+            vertical_kernel_len=vertical_kernel_len,
+            kernel_scale=kernel_scale,
+            filter_non_table_lines=filter_non_table_lines,
+            min_intersections_per_component=min_intersections_per_component,
+            min_component_length_px=min_component_length_px,
+            intersection_dilate_px=intersection_dilate_px,
+        )
+
+        if line_mask is None or cv2.countNonZero(line_mask) == 0:
+            return np.zeros(img_array.shape[:2], dtype=np.uint8)
+
+        ys, xs = np.where(line_mask > 0)
+        y0, y1 = int(ys.min()), int(ys.max())
+        x0, x1 = int(xs.min()), int(xs.max())
+
+        # Add a small margin
+        pad = 2
+        h, w = line_mask.shape[:2]
+        x0 = max(0, x0 - pad)
+        y0 = max(0, y0 - pad)
+        x1 = min(w - 1, x1 + pad)
+        y1 = min(h - 1, y1 + pad)
+
+        roi_lines = line_mask[y0 : y1 + 1, x0 : x1 + 1]
+        k = max(1, int(line_dilate_px))
+        dil_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+        roi_lines_d = cv2.dilate(roi_lines, dil_kernel, iterations=1)
+
+        roi_inv = cv2.bitwise_not(roi_lines_d)
+
+        num, labels, stats, _ = cv2.connectedComponentsWithStats(roi_inv, connectivity=8)
+        roi_area = roi_inv.shape[0] * roi_inv.shape[1]
+        max_area_px = int(max_cell_area_ratio * roi_area)
+
+        cells_roi = np.zeros_like(roi_inv)
+        for label in range(1, num):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area < int(min_cell_area_px) or area > max_area_px:
+                continue
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            cw = int(stats[label, cv2.CC_STAT_WIDTH])
+            ch = int(stats[label, cv2.CC_STAT_HEIGHT])
+            if cw < int(min_cell_width_px) or ch < int(min_cell_height_px):
+                continue
+            comp = (labels == label).astype(np.uint8) * 255
+            cells_roi = cv2.bitwise_or(cells_roi, comp)
+
+        # Place back into full image mask
+        cells_mask = np.zeros((h, w), dtype=np.uint8)
+        cells_mask[y0 : y1 + 1, x0 : x1 + 1] = cells_roi
+        return cells_mask

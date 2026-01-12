@@ -239,6 +239,7 @@ class ImageEditor:
 
         # Table detection mask (binary mask as PIL 'L', 0/255), aligned to _base_image
         self.table_mask: Optional[Image.Image] = None
+        self.table_cells_mask: Optional[Image.Image] = None
 
         # History (Photoshop-like): list of snapshots + pointer
         self._history: List[dict] = []
@@ -260,6 +261,7 @@ class ImageEditor:
         self.crop_box = None
         self.paint_layer = None
         self.table_mask = None
+        self.table_cells_mask = None
         self._reset_history()
         self._push_history("Open")
     
@@ -321,6 +323,8 @@ class ImageEditor:
         # Invalidate table mask if size changed
         if self.table_mask is not None and self.table_mask.size != img.size:
             self.table_mask = None
+        if self.table_cells_mask is not None and self.table_cells_mask.size != img.size:
+            self.table_cells_mask = None
 
         # Composite paint layer (if any)
         if self.paint_layer is not None:
@@ -365,6 +369,11 @@ class ImageEditor:
         """Set/clear the table mask (expects 'L' image 0/255, same size as base)."""
         self.table_mask = mask
         self._push_history("Table mask" if mask is not None else "Table mask cleared")
+
+    def set_table_cells_mask(self, mask: Optional[Image.Image]):
+        """Set/clear the table cells mask (expects 'L' image 0/255, same size as base)."""
+        self.table_cells_mask = mask
+        self._push_history("Cells mask" if mask is not None else "Cells mask cleared")
 
     def reset(self):
         """Reset all operations."""
@@ -516,6 +525,7 @@ class ImageManagementUI:
         # Used by the Select Wizard dialog (menu); kept even if the left-panel wizard is hidden.
         self.select_pattern_var = tk.StringVar(value="")
         self.show_table_mask_var = tk.BooleanVar(value=False)
+        self.show_table_cells_var = tk.BooleanVar(value=False)
 
         # Preserve per-page view (zoom/pan) so switching pages doesn't reset.
         self._view_state_by_index: Dict[int, tuple[float, int, int]] = {}
@@ -864,10 +874,13 @@ class ImageManagementUI:
         edit_menu.add_separator()
         edit_menu.add_command(label="Detect table lines", command=self._detect_table_selected)
         edit_menu.add_checkbutton(label="Show table mask", onvalue=True, offvalue=False, variable=self.show_table_mask_var, command=self._refresh_view)
+        edit_menu.add_command(label="Detect table cells mask", command=self._detect_table_cells_selected)
+        edit_menu.add_checkbutton(label="Show cells mask", onvalue=True, offvalue=False, variable=self.show_table_cells_var, command=self._refresh_view)
         edit_menu.add_separator()
         edit_menu.add_command(label="Reset operations", command=self._reset_operations)
         edit_menu.add_command(label="Clear crop", command=self._clear_crop)
         edit_menu.add_command(label="Clear table mask", command=self._clear_table_mask_selected)
+        edit_menu.add_command(label="Clear cells mask", command=self._clear_table_cells_mask_selected)
         edit_menu.add_separator()
         edit_menu.add_command(label="Delete selected", command=self._delete_selected)
         edit_btn["menu"] = edit_menu
@@ -1025,6 +1038,27 @@ class ImageManagementUI:
         self.show_table_mask_var.set(True)
         self._display_current_image()
 
+    def _detect_table_cells_selected(self):
+        """Compute table cells mask for all selected images (or current)."""
+        targets = self._get_selected_indices_or_current()
+        if not targets:
+            messagebox.showwarning("Detect table", "No images selected.")
+            return
+
+        for idx in targets:
+            editor = self._ensure_editor(idx)
+            base = editor.get_base_image()
+            if base is None:
+                base = editor.get_current_image()
+            if base is None:
+                continue
+            img_np = np.array(base.convert("RGB"))
+            cells = PDFImageProcessor.detect_table_cells_mask(img_np)
+            editor.set_table_cells_mask(Image.fromarray(cells, mode="L"))
+
+        self.show_table_cells_var.set(True)
+        self._display_current_image()
+
     def _clear_table_mask_selected(self):
         targets = self._get_selected_indices_or_current()
         if not targets:
@@ -1032,6 +1066,15 @@ class ImageManagementUI:
         for idx in targets:
             if idx in self.image_editors:
                 self.image_editors[idx].set_table_mask(None)
+        self._display_current_image()
+
+    def _clear_table_cells_mask_selected(self):
+        targets = self._get_selected_indices_or_current()
+        if not targets:
+            return
+        for idx in targets:
+            if idx in self.image_editors:
+                self.image_editors[idx].set_table_cells_mask(None)
         self._display_current_image()
 
     # ----------------------------
@@ -1683,6 +1726,8 @@ class ImageManagementUI:
         display_img = current_img
         if self.show_table_mask_var.get() and editor.table_mask is not None:
             display_img = self._composite_table_mask(display_img, editor.table_mask)
+        if self.show_table_cells_var.get() and editor.table_cells_mask is not None:
+            display_img = self._composite_cells_mask(display_img, editor.table_cells_mask)
 
         # Preserve view: if we're refreshing the same page (e.g. brush stroke), don't reset.
         same_page = (self._viewer_current_index == self.current_index)
@@ -1749,6 +1794,20 @@ class ImageManagementUI:
         overlay = Image.new("RGBA", base_img.size, (255, 0, 0, 0))
         # Alpha = mask * 0.55
         alpha = mask_l.point(lambda p: int(p * 0.55))
+        overlay.putalpha(alpha)
+        return Image.alpha_composite(base_rgba, overlay).convert("RGB")
+
+    def _composite_cells_mask(self, base_img: Image.Image, mask_l: Image.Image) -> Image.Image:
+        """
+        Overlay the cells mask in semi-transparent green.
+        """
+        if mask_l.mode != "L":
+            mask_l = mask_l.convert("L")
+        if mask_l.size != base_img.size:
+            return base_img
+        base_rgba = base_img.convert("RGBA")
+        overlay = Image.new("RGBA", base_img.size, (0, 255, 0, 0))
+        alpha = mask_l.point(lambda p: int(p * 0.35))
         overlay.putalpha(alpha)
         return Image.alpha_composite(base_rgba, overlay).convert("RGB")
     
