@@ -787,11 +787,12 @@ class ImageManagementUI:
         file_menu.add_command(label="Export All…", command=self._export_all)
         file_menu.add_separator()
         file_menu.add_command(label="OCR selected cells…", command=self._ocr_selected_cells)
+        # IMPORTANT: store the index *now* (before adding other items), so we enable/disable the correct entry
+        self._file_menu = file_menu
+        self._file_menu_ocr_index = file_menu.index("end")
         file_menu.add_separator()
         file_menu.add_command(label="Export table (CSV) - current page…", command=self._export_table_csv_current)
         file_menu.add_command(label="Export table (CSV) - all pages…", command=self._export_table_csv_all)
-        self._file_menu = file_menu
-        self._file_menu_ocr_index = file_menu.index("end")
         file_menu.add_command(label="Settings…", command=self._open_settings_window)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.destroy)
