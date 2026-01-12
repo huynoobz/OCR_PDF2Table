@@ -27,6 +27,9 @@ class UISettings:
     confirm_delete: bool = True
     history_max_steps: int = 50
     ocr_lang: str = "eng"
+    # Persisted UI layout (PanedWindow sash positions, pixels)
+    sidebar_sash0: Optional[int] = None
+    sidebar_sash1: Optional[int] = None
     # Friendly key strings (e.g. "Ctrl+O", "Tab") -> converted to Tk sequences at bind time
     keymap: Optional[Dict[str, str]] = None
 
@@ -566,7 +569,9 @@ class ImageManagementUI:
 
         # Main container (PanedWindow for resizable sidebars)
         main_pane = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
+        self._main_pane = main_pane
         main_pane.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=5)
+        main_pane.bind("<ButtonRelease-1>", lambda _e: self._capture_pane_sashes())
 
         tools_panel = ttk.Frame(main_pane, width=180)
         right_panel = ttk.Frame(main_pane)
@@ -626,7 +631,10 @@ class ImageManagementUI:
         # - Right click: cell context menu (after Detect table)
         self.canvas.bind("<Button-3>", self._on_canvas_right_click)
         self.viewer._bind_viewer_events()
-        
+
+        # Restore persisted sidebar widths after widgets are realized
+        self.root.after(50, self._restore_pane_sashes)
+
         # Navigation controls
         nav_frame = ttk.Frame(viewer_frame)
         nav_frame.pack(fill=tk.X, pady=5)
@@ -665,6 +673,47 @@ class ImageManagementUI:
         self.crop_start = None
         self.crop_rect = None
         self.crop_mode = False
+
+    def _restore_pane_sashes(self):
+        pane = getattr(self, "_main_pane", None)
+        if pane is None:
+            return
+        try:
+            self.root.update_idletasks()
+            w = int(max(200, pane.winfo_width()))
+            # Leave some minimum width for each region
+            min_left = 120
+            min_center = 240
+            min_right = 160
+
+            # First sash (between left sidebar and center)
+            if getattr(self.settings, "sidebar_sash0", None) is not None:
+                pos0 = int(self.settings.sidebar_sash0)
+                pos0 = max(min_left, min(w - (min_center + min_right), pos0))
+                pane.sashpos(0, pos0)
+
+            # Second sash (between center and right sidebar)
+            if getattr(self.settings, "sidebar_sash1", None) is not None:
+                pos1 = int(self.settings.sidebar_sash1)
+                # pos1 is from left edge; ensure right pane has min_right
+                pos1 = max(min_left + min_center, min(w - min_right, pos1))
+                pane.sashpos(1, pos1)
+        except Exception:
+            # Never crash UI for layout restore
+            pass
+
+    def _capture_pane_sashes(self):
+        pane = getattr(self, "_main_pane", None)
+        if pane is None:
+            return
+        try:
+            self.root.update_idletasks()
+            # Two sashes for three panes
+            self.settings.sidebar_sash0 = int(pane.sashpos(0))
+            self.settings.sidebar_sash1 = int(pane.sashpos(1))
+            self._save_settings()
+        except Exception:
+            pass
     
     def load_images(self, processed_images: List[ProcessedImage]):
         """Load processed images from Module 1."""
@@ -1171,6 +1220,8 @@ class ImageManagementUI:
             confirm_delete=True,
             history_max_steps=50,
             ocr_lang="eng",
+            sidebar_sash0=None,
+            sidebar_sash1=None,
             keymap=self._default_keymap(),
         )
         try:
@@ -1180,6 +1231,10 @@ class ImageManagementUI:
                 # Merge with defaults
                 keymap = defaults.keymap.copy()
                 keymap.update(data.get("keymap") or {})
+                sash0 = data.get("sidebar_sash0", defaults.sidebar_sash0)
+                sash1 = data.get("sidebar_sash1", defaults.sidebar_sash1)
+                sash0 = int(sash0) if sash0 is not None else None
+                sash1 = int(sash1) if sash1 is not None else None
                 return UISettings(
                     default_dpi=int(data.get("default_dpi", defaults.default_dpi)),
                     auto_fit_on_load=bool(data.get("auto_fit_on_load", defaults.auto_fit_on_load)),
@@ -1187,6 +1242,8 @@ class ImageManagementUI:
                     confirm_delete=bool(data.get("confirm_delete", defaults.confirm_delete)),
                     history_max_steps=int(data.get("history_max_steps", defaults.history_max_steps)),
                     ocr_lang=str(data.get("ocr_lang", defaults.ocr_lang)),
+                    sidebar_sash0=sash0,
+                    sidebar_sash1=sash1,
                     keymap=keymap,
                 )
         except Exception:

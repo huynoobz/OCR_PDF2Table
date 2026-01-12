@@ -3,6 +3,8 @@
   "auto_fit_on_load": true,
   "show_toolbar_hint": true,
   "confirm_delete": true,
+  "sidebar_sash0": null,
+  "sidebar_sash1": null,
   "ocr_lang": "eng",
   "keymap": {
     "open_pdf": "Ctrl+O",
