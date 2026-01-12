@@ -33,8 +33,6 @@ class UISettings:
     m1_apply_deskew: bool = True
     m1_apply_contrast: bool = True
     m1_contrast_factor: float = 1.2
-    m1_apply_ocr_enhance: bool = False
-    m1_ocr_enhance_mode: str = "adaptive_binary"  # "adaptive_binary" | "gray"
     # Persisted UI layout (PanedWindow sash positions, pixels)
     sidebar_sash0: Optional[int] = None
     sidebar_sash1: Optional[int] = None
@@ -1233,8 +1231,6 @@ class ImageManagementUI:
             m1_apply_deskew=True,
             m1_apply_contrast=True,
             m1_contrast_factor=1.2,
-            m1_apply_ocr_enhance=False,
-            m1_ocr_enhance_mode="adaptive_binary",
             sidebar_sash0=None,
             sidebar_sash1=None,
             keymap=self._default_keymap(),
@@ -1262,8 +1258,6 @@ class ImageManagementUI:
                     m1_apply_deskew=bool(data.get("m1_apply_deskew", defaults.m1_apply_deskew)),
                     m1_apply_contrast=bool(data.get("m1_apply_contrast", defaults.m1_apply_contrast)),
                     m1_contrast_factor=float(data.get("m1_contrast_factor", defaults.m1_contrast_factor)),
-                    m1_apply_ocr_enhance=bool(data.get("m1_apply_ocr_enhance", defaults.m1_apply_ocr_enhance)),
-                    m1_ocr_enhance_mode=str(data.get("m1_ocr_enhance_mode", defaults.m1_ocr_enhance_mode)),
                     sidebar_sash0=sash0,
                     sidebar_sash1=sash1,
                     keymap=keymap,
@@ -1357,8 +1351,6 @@ class ImageManagementUI:
         m1_deskew_var = tk.BooleanVar(value=bool(getattr(self.settings, "m1_apply_deskew", True)))
         m1_contrast_var = tk.BooleanVar(value=bool(getattr(self.settings, "m1_apply_contrast", True)))
         m1_contrast_factor_var = tk.DoubleVar(value=float(getattr(self.settings, "m1_contrast_factor", 1.2)))
-        m1_ocr_enh_var = tk.BooleanVar(value=bool(getattr(self.settings, "m1_apply_ocr_enhance", False)))
-        m1_ocr_mode_var = tk.StringVar(value=str(getattr(self.settings, "m1_ocr_enhance_mode", "adaptive_binary")))
 
         ttk.Checkbutton(general, text="Grayscale", variable=m1_gray_var).grid(
             row=row, column=0, columnspan=2, sticky=tk.W, pady=2
@@ -1375,16 +1367,6 @@ class ImageManagementUI:
 
         ttk.Checkbutton(general, text="Contrast", variable=m1_contrast_var).grid(row=row, column=0, sticky=tk.W, pady=2)
         ttk.Entry(general, textvariable=m1_contrast_factor_var, width=10).grid(row=row, column=1, sticky=tk.W, pady=2)
-        row += 1
-
-        ttk.Checkbutton(general, text="OCR enhance", variable=m1_ocr_enh_var).grid(row=row, column=0, sticky=tk.W, pady=2)
-        ttk.Combobox(
-            general,
-            textvariable=m1_ocr_mode_var,
-            values=["adaptive_binary", "gray"],
-            width=16,
-            state="readonly",
-        ).grid(row=row, column=1, sticky=tk.W, pady=2)
         row += 1
 
         # Shortcuts tab
@@ -1448,8 +1430,6 @@ class ImageManagementUI:
                 self.settings.m1_contrast_factor = float(m1_contrast_factor_var.get())
             except Exception:
                 self.settings.m1_contrast_factor = 1.2
-            self.settings.m1_apply_ocr_enhance = bool(m1_ocr_enh_var.get())
-            self.settings.m1_ocr_enhance_mode = (m1_ocr_mode_var.get() or "adaptive_binary").strip()
 
             # Persist shortcuts
             if self.settings.keymap is None:
@@ -1625,8 +1605,6 @@ class ImageManagementUI:
                 apply_deskew=bool(getattr(self.settings, "m1_apply_deskew", True)),
                 apply_contrast=bool(getattr(self.settings, "m1_apply_contrast", True)),
                 contrast_factor=float(getattr(self.settings, "m1_contrast_factor", 1.2)),
-                apply_ocr_enhance=bool(getattr(self.settings, "m1_apply_ocr_enhance", False)),
-                ocr_enhance_mode=str(getattr(self.settings, "m1_ocr_enhance_mode", "adaptive_binary")),
             )
             self.load_images(images)
             messagebox.showinfo("Success", f"Loaded {len(images)} pages from PDF")
@@ -1657,8 +1635,6 @@ class ImageManagementUI:
                 apply_deskew=bool(getattr(self.settings, "m1_apply_deskew", True)),
                 apply_contrast=bool(getattr(self.settings, "m1_apply_contrast", True)),
                 contrast_factor=float(getattr(self.settings, "m1_contrast_factor", 1.2)),
-                apply_ocr_enhance=bool(getattr(self.settings, "m1_apply_ocr_enhance", False)),
-                ocr_enhance_mode=str(getattr(self.settings, "m1_ocr_enhance_mode", "adaptive_binary")),
             )
             self.processed_images.append(processed)
             self._update_listbox()

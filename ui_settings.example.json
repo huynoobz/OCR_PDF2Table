@@ -8,8 +8,6 @@
   "m1_apply_deskew": true,
   "m1_apply_contrast": true,
   "m1_contrast_factor": 1.2,
-  "m1_apply_ocr_enhance": false,
-  "m1_ocr_enhance_mode": "adaptive_binary",
   "sidebar_sash0": null,
   "sidebar_sash1": null,
   "ocr_lang": "eng",
