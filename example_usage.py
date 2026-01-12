@@ -1,164 +1,126 @@
 """
-Example usage of Module 1 and Module 2.
-Demonstrates how to use the image processing module and UI module.
+Auto test script for Module 1.
+
+This script is meant to be run non-interactively using a local `test.pdf`.
+It converts the PDF into per-page images, runs the processing pipeline, and
+exports images + a short report.
+
+Usage:
+  python example_usage.py
+
+Expected:
+  - A file named `test.pdf` in the project root
+  - An `auto_test_output/` folder will be created
 """
 
+from __future__ import annotations
+
+import os
+import sys
+import time
+from dataclasses import asdict
+
 from module1_image_processing import PDFImageProcessor
-from module2_user_interface import ImageManagementUI
-import tkinter as tk
 
 
-def example_module1_standalone():
-    """Example of using Module 1 standalone (without UI)."""
-    print("Example: Using Module 1 standalone")
-    print("-" * 50)
-    
-    # Initialize processor
+def run_auto_test(
+    pdf_path: str = "test.pdf",
+    output_dir: str = "auto_test_output",
+    dpi: int = 300,
+) -> int:
+    """
+    Run a simple end-to-end test of Module 1 using `test.pdf`.
+
+    Returns:
+        0 on success, non-zero on failure.
+    """
+    abs_pdf = os.path.abspath(pdf_path)
+    abs_out = os.path.abspath(output_dir)
+
+    print("=" * 60)
+    print("AUTO TEST: Module 1 (PDF -> processed images)")
+    print(f"PDF: {abs_pdf}")
+    print(f"OUT: {abs_out}")
+    print("=" * 60)
+
+    if not os.path.exists(abs_pdf):
+        print(f"[FAIL] Missing file: {abs_pdf}")
+        print("Place `test.pdf` in the project root and re-run.")
+        return 2
+
+    os.makedirs(abs_out, exist_ok=True)
+
     processor = PDFImageProcessor()
-    
-    # Process PDF with custom settings
-    pdf_path = "example.pdf"  # Replace with your PDF path
-    
-    try:
-        # Process with default settings
-        images = processor.process_pdf(
-            pdf_path=pdf_path,
-            dpi=300,
-            apply_grayscale=True,
-            apply_denoise=True,
-            apply_deskew=True,
-            apply_contrast=True,
-            contrast_factor=1.2
-        )
-        
-        print(f"Processed {len(images)} pages")
-        
-        # Access processed images and metadata
-        for processed in images:
-            meta = processed.metadata
-            print(f"\nPage {meta.page_number}:")
-            print(f"  Original size: {meta.original_size}")
-            print(f"  Processed size: {meta.processed_size}")
-            print(f"  Operations: {', '.join(meta.applied_operations)}")
-            
-            # Access image as numpy array
-            img_array = processed.image
-            
-            # Access image as PIL Image
-            pil_img = processed.pil_image
-            
-            # Save if needed
-            # pil_img.save(f"output_page_{meta.page_number}.png")
-        
-    except FileNotFoundError:
-        print(f"PDF file not found: {pdf_path}")
-        print("Please update the pdf_path variable with a valid PDF file.")
-    except Exception as e:
-        print(f"Error: {str(e)}")
 
+    # Example per-page config: rotate page 1 by 0 degrees (no-op) by default.
+    page_rotations = {}
+    crop_boxes = {}
 
-def example_module1_with_custom_settings():
-    """Example of using Module 1 with custom per-page settings."""
-    print("\nExample: Using Module 1 with custom settings")
-    print("-" * 50)
-    
-    processor = PDFImageProcessor()
-    pdf_path = "example.pdf"  # Replace with your PDF path
-    
+    start = time.time()
     try:
-        # Custom rotation for specific pages
-        page_rotations = {
-            1: 90,   # Rotate page 1 by 90 degrees
-            3: 180,  # Rotate page 3 by 180 degrees
-        }
-        
-        # Custom crop boxes for specific pages
-        crop_boxes = {
-            2: (100, 100, 800, 1000),  # Crop page 2
-        }
-        
         images = processor.process_pdf(
-            pdf_path=pdf_path,
-            dpi=300,
+            pdf_path=abs_pdf,
+            dpi=dpi,
             page_rotations=page_rotations,
             crop_boxes=crop_boxes,
             apply_grayscale=True,
             apply_denoise=True,
             apply_deskew=True,
-            apply_contrast=True
+            apply_contrast=True,
+            contrast_factor=1.2,
         )
-        
-        print(f"Processed {len(images)} pages with custom settings")
-        
-    except FileNotFoundError:
-        print(f"PDF file not found: {pdf_path}")
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print(f"[FAIL] Exception while processing PDF: {e}")
+        return 3
 
+    elapsed = time.time() - start
 
-def example_module2_ui():
-    """Example of launching the UI module."""
-    print("\nExample: Launching Module 2 UI")
-    print("-" * 50)
-    print("The UI window will open. You can:")
-    print("  - Load PDF files directly from the UI")
-    print("  - Add external image files")
-    print("  - View, zoom, and pan images")
-    print("  - Apply non-destructive edits (rotate, crop, brightness, contrast)")
-    print("  - Reorder and delete images")
-    print("  - Export selected images")
-    
-    root = tk.Tk()
-    app = ImageManagementUI(root)
-    root.mainloop()
+    if not images:
+        print("[FAIL] No pages/images were produced.")
+        return 4
 
+    # Export images + report
+    report_lines: list[str] = []
+    report_lines.append(f"pdf={abs_pdf}")
+    report_lines.append(f"dpi={dpi}")
+    report_lines.append(f"pages={len(images)}")
+    report_lines.append(f"elapsed_seconds={elapsed:.3f}")
+    report_lines.append("")
 
-def example_integration():
-    """Example of integrating Module 1 and Module 2."""
-    print("\nExample: Integrating Module 1 and Module 2")
-    print("-" * 50)
-    
-    # Process PDF with Module 1
-    processor = PDFImageProcessor()
-    pdf_path = "example.pdf"  # Replace with your PDF path
-    
-    try:
-        images = processor.process_pdf(pdf_path, dpi=300)
-        print(f"Processed {len(images)} pages with Module 1")
-        
-        # Load into Module 2 UI
-        root = tk.Tk()
-        app = ImageManagementUI(root)
-        app.load_images(images)
-        print("Loaded images into Module 2 UI")
-        root.mainloop()
-        
-    except FileNotFoundError:
-        print(f"PDF file not found: {pdf_path}")
-        print("Launching UI without pre-loaded images...")
-        # Launch UI anyway
-        root = tk.Tk()
-        app = ImageManagementUI(root)
-        root.mainloop()
-    except Exception as e:
-        print(f"Error: {str(e)}")
+    for item in images:
+        meta = item.metadata
+        filename = f"page_{meta.page_number:03d}.png"
+        out_path = os.path.join(abs_out, filename)
+        item.pil_image.save(out_path, "PNG")
+
+        report_lines.append(f"[page {meta.page_number}] saved={filename}")
+        report_lines.append(f"  original_size={meta.original_size}")
+        report_lines.append(f"  processed_size={meta.processed_size}")
+        report_lines.append(f"  applied_operations={meta.applied_operations}")
+        report_lines.append("")
+
+        # Basic sanity checks
+        if meta.page_number <= 0:
+            print("[FAIL] Invalid page_number in metadata.")
+            return 5
+        if meta.processed_size[0] <= 0 or meta.processed_size[1] <= 0:
+            print("[FAIL] Invalid processed_size in metadata.")
+            return 6
+
+    # Write metadata json-ish dump for debugging
+    meta_dump_path = os.path.join(abs_out, "metadata.txt")
+    with open(meta_dump_path, "w", encoding="utf-8") as f:
+        for item in images:
+            f.write(str(asdict(item.metadata)) + "\n")
+
+    report_path = os.path.join(abs_out, "report.txt")
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(report_lines).strip() + "\n")
+
+    print(f"[OK] Processed pages: {len(images)} in {elapsed:.2f}s")
+    print(f"[OK] Exported PNGs + report to: {abs_out}")
+    return 0
 
 
 if __name__ == "__main__":
-    print("=" * 50)
-    print("OCR PDF to Table - Example Usage")
-    print("=" * 50)
-    
-    # Uncomment the example you want to run:
-    
-    # Example 1: Use Module 1 standalone
-    # example_module1_standalone()
-    
-    # Example 2: Use Module 1 with custom settings
-    # example_module1_with_custom_settings()
-    
-    # Example 3: Launch Module 2 UI directly
-    example_module2_ui()
-    
-    # Example 4: Integrate both modules
-    # example_integration()
+    raise SystemExit(run_auto_test())

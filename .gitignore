@@ -41,6 +41,7 @@ Thumbs.db
 *.pdf
 output/
 exports/
+auto_test_output/
 *.png
 *.jpg
 *.jpeg
