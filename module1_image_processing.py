@@ -10,6 +10,7 @@ from pdf2image import convert_from_path
 from typing import List, Dict, Optional, Tuple, Any
 import cv2
 from dataclasses import dataclass, field
+from typing import Callable
 
 
 @dataclass
@@ -533,3 +534,31 @@ class PDFImageProcessor:
         cells_mask = np.zeros((h, w), dtype=np.uint8)
         cells_mask[y0 : y1 + 1, x0 : x1 + 1] = cells_roi
         return cells_mask
+
+    @staticmethod
+    def ocr_image_pil(
+        pil_image: Image.Image,
+        *,
+        lang: str = "eng",
+        psm: int = 6,
+        oem: Optional[int] = None,
+        config_extra: str = "",
+    ) -> str:
+        """
+        Run Tesseract OCR on a PIL image.
+
+        Requires `pytesseract` package and a working Tesseract installation.
+        """
+        try:
+            import pytesseract  # type: ignore
+        except Exception as e:
+            raise RuntimeError("pytesseract is not installed. Run `pip install pytesseract`.") from e
+
+        cfg = f"--psm {int(psm)}"
+        if oem is not None:
+            cfg += f" --oem {int(oem)}"
+        if config_extra:
+            cfg += f" {config_extra}"
+
+        text = pytesseract.image_to_string(pil_image, lang=lang, config=cfg)
+        return text

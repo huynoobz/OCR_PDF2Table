@@ -15,6 +15,7 @@ from dataclasses import dataclass, asdict
 from PIL import ImageDraw
 import numpy as np
 from module1_image_processing import ProcessedImage, PDFImageProcessor
+import cv2
 
 
 @dataclass
@@ -24,6 +25,7 @@ class UISettings:
     show_toolbar_hint: bool = True
     confirm_delete: bool = True
     history_max_steps: int = 50
+    ocr_lang: str = "eng"
     # Friendly key strings (e.g. "Ctrl+O", "Tab") -> converted to Tk sequences at bind time
     keymap: Optional[Dict[str, str]] = None
 
@@ -240,6 +242,8 @@ class ImageEditor:
         # Table detection mask (binary mask as PIL 'L', 0/255), aligned to _base_image
         self.table_mask: Optional[Image.Image] = None
         self.table_cells_mask: Optional[Image.Image] = None
+        self.table_cell_boxes: Optional[List[tuple[int, int, int, int]]] = None  # (l,t,r,b)
+        self.selected_cell_indices: set[int] = set()
 
         # History (Photoshop-like): list of snapshots + pointer
         self._history: List[dict] = []
@@ -262,6 +266,8 @@ class ImageEditor:
         self.paint_layer = None
         self.table_mask = None
         self.table_cells_mask = None
+        self.table_cell_boxes = None
+        self.selected_cell_indices = set()
         self._reset_history()
         self._push_history("Open")
     
@@ -325,6 +331,8 @@ class ImageEditor:
             self.table_mask = None
         if self.table_cells_mask is not None and self.table_cells_mask.size != img.size:
             self.table_cells_mask = None
+            self.table_cell_boxes = None
+            self.selected_cell_indices = set()
 
         # Composite paint layer (if any)
         if self.paint_layer is not None:
@@ -373,6 +381,8 @@ class ImageEditor:
     def set_table_cells_mask(self, mask: Optional[Image.Image]):
         """Set/clear the table cells mask (expects 'L' image 0/255, same size as base)."""
         self.table_cells_mask = mask
+        self.table_cell_boxes = None
+        self.selected_cell_indices = set()
         self._push_history("Cells mask" if mask is not None else "Cells mask cleared")
 
     def reset(self):
@@ -691,6 +701,7 @@ class ImageManagementUI:
 
         tool_btn("Hand (Pan)", "hand")
         tool_btn("Zoom", "zoom")
+        tool_btn("Cell Select (OCR)", "cell_select")
 
         ttk.Separator(parent).pack(fill=tk.X, pady=8)
 
@@ -735,6 +746,18 @@ class ImageManagementUI:
             self.canvas.bind("<Button-5>", self.viewer.on_wheel)
             return
 
+        if tool == "cell_select":
+            self.canvas.config(cursor="tcross")
+
+            def pick(event):
+                self._toggle_cell_at_canvas_xy(event.x, event.y)
+
+            self.canvas.bind("<Button-1>", pick)
+            self.canvas.bind("<MouseWheel>", self.viewer.on_wheel)
+            self.canvas.bind("<Button-4>", self.viewer.on_wheel)
+            self.canvas.bind("<Button-5>", self.viewer.on_wheel)
+            return
+
     # ----------------------------
     # Toolbar / Menus
     # ----------------------------
@@ -748,6 +771,8 @@ class ImageManagementUI:
         file_menu.add_separator()
         file_menu.add_command(label="Export Selected…", command=self._export_selected)
         file_menu.add_command(label="Export All…", command=self._export_all)
+        file_menu.add_separator()
+        file_menu.add_command(label="OCR selected cells…", command=self._ocr_selected_cells)
         file_menu.add_command(label="Settings…", command=self._open_settings_window)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.destroy)
@@ -839,6 +864,53 @@ class ImageManagementUI:
         ix = max(0.0, min(float(img_w - 1), ix))
         iy = max(0.0, min(float(img_h - 1), iy))
         return (ix, iy)
+
+    def _ensure_cell_boxes(self, editor: ImageEditor):
+        """Compute cell bounding boxes from editor.table_cells_mask (cached)."""
+        if editor.table_cells_mask is None:
+            editor.table_cell_boxes = None
+            return
+        if editor.table_cell_boxes is not None:
+            return
+        mask = np.array(editor.table_cells_mask.convert("L"))
+        _, bin_mask = cv2.threshold(mask, 0, 255, cv2.THRESH_BINARY)
+        num, labels, stats, _ = cv2.connectedComponentsWithStats(bin_mask, connectivity=8)
+        boxes: List[tuple[int, int, int, int]] = []
+        for label in range(1, num):
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            w = int(stats[label, cv2.CC_STAT_WIDTH])
+            h = int(stats[label, cv2.CC_STAT_HEIGHT])
+            if w < 5 or h < 5:
+                continue
+            boxes.append((x, y, x + w, y + h))
+        editor.table_cell_boxes = boxes
+
+    def _toggle_cell_at_canvas_xy(self, canvas_x: float, canvas_y: float):
+        """Toggle selection of a cell under cursor (requires cells mask)."""
+        if self.current_index < 0 or self.current_index >= len(self.processed_images):
+            return
+        editor = self._ensure_editor(self.current_index)
+        if editor.table_cells_mask is None:
+            messagebox.showwarning("OCR", "No cells mask detected. Run Edit → Detect table cells first.")
+            return
+        self._ensure_cell_boxes(editor)
+        if not editor.table_cell_boxes:
+            messagebox.showwarning("OCR", "No cells found in mask.")
+            return
+
+        p = self._canvas_to_image_xy(canvas_x, canvas_y)
+        if p is None:
+            return
+        ix, iy = int(p[0]), int(p[1])
+        for i, (l, t, r, b) in enumerate(editor.table_cell_boxes):
+            if l <= ix < r and t <= iy < b:
+                if i in editor.selected_cell_indices:
+                    editor.selected_cell_indices.remove(i)
+                else:
+                    editor.selected_cell_indices.add(i)
+                self._display_current_image()
+                return
 
     def _ensure_editor(self, idx: int) -> ImageEditor:
         if idx not in self.image_editors:
@@ -1093,6 +1165,7 @@ class ImageManagementUI:
             show_toolbar_hint=True,
             confirm_delete=True,
             history_max_steps=50,
+            ocr_lang="eng",
             keymap=self._default_keymap(),
         )
         try:
@@ -1108,6 +1181,7 @@ class ImageManagementUI:
                     show_toolbar_hint=bool(data.get("show_toolbar_hint", defaults.show_toolbar_hint)),
                     confirm_delete=bool(data.get("confirm_delete", defaults.confirm_delete)),
                     history_max_steps=int(data.get("history_max_steps", defaults.history_max_steps)),
+                    ocr_lang=str(data.get("ocr_lang", defaults.ocr_lang)),
                     keymap=keymap,
                 )
         except Exception:
@@ -1156,6 +1230,7 @@ class ImageManagementUI:
         hint_var = tk.BooleanVar(value=bool(self.settings.show_toolbar_hint))
         confirm_del_var = tk.BooleanVar(value=bool(self.settings.confirm_delete))
         history_max_var = tk.IntVar(value=int(getattr(self.settings, "history_max_steps", 50)))
+        ocr_lang_var = tk.StringVar(value=str(getattr(self.settings, "ocr_lang", "eng")))
 
         row = 0
         ttk.Label(general, text="Default DPI (for Open PDF):").grid(row=row, column=0, sticky=tk.W, pady=4)
@@ -1179,6 +1254,10 @@ class ImageManagementUI:
 
         ttk.Label(general, text="History max steps:").grid(row=row, column=0, sticky=tk.W, pady=4)
         ttk.Entry(general, textvariable=history_max_var, width=10).grid(row=row, column=1, sticky=tk.W, pady=4)
+        row += 1
+
+        ttk.Label(general, text="OCR language (Tesseract lang code):").grid(row=row, column=0, sticky=tk.W, pady=4)
+        ttk.Entry(general, textvariable=ocr_lang_var, width=20).grid(row=row, column=1, sticky=tk.W, pady=4)
         row += 1
 
         # Shortcuts tab
@@ -1233,6 +1312,7 @@ class ImageManagementUI:
             self.settings.show_toolbar_hint = bool(hint_var.get())
             self.settings.confirm_delete = bool(confirm_del_var.get())
             self.settings.history_max_steps = max(5, int(history_max_var.get()))
+            self.settings.ocr_lang = (ocr_lang_var.get() or "eng").strip()
 
             # Persist shortcuts
             if self.settings.keymap is None:
@@ -1540,6 +1620,70 @@ class ImageManagementUI:
         self.image_listbox.selection_clear(0, tk.END)
         self.image_listbox.selection_set(0, tk.END)
         self._export_selected()
+
+    def _ocr_selected_cells(self):
+        """
+        OCR currently selected cells for the current page and save to a text file.
+        Requires:
+          - cells mask detected
+          - some cells selected (Cell Select tool)
+          - Tesseract installed + pytesseract installed
+        """
+        if self.current_index < 0 or self.current_index >= len(self.processed_images):
+            messagebox.showwarning("OCR", "No page selected.")
+            return
+        editor = self._ensure_editor(self.current_index)
+        if editor.table_cells_mask is None:
+            messagebox.showwarning("OCR", "No cells mask. Run Edit → Detect table cells first.")
+            return
+        self._ensure_cell_boxes(editor)
+        if not editor.selected_cell_indices:
+            messagebox.showwarning("OCR", "No cells selected. Use Tool → Cell Select (OCR) then click cells.")
+            return
+
+        base = editor.get_base_image()
+        if base is None:
+            base = editor.get_current_image()
+        if base is None:
+            messagebox.showerror("OCR", "No image data available.")
+            return
+
+        out_path = filedialog.asksaveasfilename(
+            title="Save OCR output",
+            defaultextension=".txt",
+            filetypes=[("Text", "*.txt"), ("All files", "*.*")],
+        )
+        if not out_path:
+            return
+
+        lang = str(getattr(self.settings, "ocr_lang", "eng") or "eng").strip()
+
+        lines: List[str] = []
+        lines.append(f"page={self.processed_images[self.current_index].metadata.page_number}")
+        lines.append(f"lang={lang}")
+        lines.append("")
+
+        for idx in sorted(editor.selected_cell_indices):
+            if editor.table_cell_boxes is None or not (0 <= idx < len(editor.table_cell_boxes)):
+                continue
+            l, t, r, b = editor.table_cell_boxes[idx]
+            crop = base.crop((l, t, r, b))
+            try:
+                text = PDFImageProcessor.ocr_image_pil(crop, lang=lang, psm=6)
+            except Exception as e:
+                messagebox.showerror("OCR", f"OCR failed: {e}\n\nMake sure Tesseract OCR is installed and on PATH.")
+                return
+            text = (text or "").strip()
+            lines.append(f"[cell {idx}] box=({l},{t},{r},{b})")
+            lines.append(text)
+            lines.append("")
+
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines).rstrip() + "\n")
+            messagebox.showinfo("OCR", f"Saved OCR to:\n{out_path}")
+        except Exception as e:
+            messagebox.showerror("OCR", f"Failed to save file: {e}")
     
     def _update_listbox(self):
         """Update the image listbox."""
@@ -1611,6 +1755,9 @@ class ImageManagementUI:
             display_img = self._composite_table_mask(display_img, editor.table_mask)
         if self.show_table_cells_var.get() and editor.table_cells_mask is not None:
             display_img = self._composite_cells_mask(display_img, editor.table_cells_mask)
+        # If user is selecting cells for OCR, show selections
+        if editor.table_cell_boxes is not None and editor.selected_cell_indices:
+            display_img = self._composite_selected_cells(display_img, editor)
 
         # Preserve view: if we're refreshing the same page (e.g. brush stroke), don't reset.
         same_page = (self._viewer_current_index == self.current_index)
@@ -1687,6 +1834,19 @@ class ImageManagementUI:
         alpha = mask_l.point(lambda p: int(p * 0.35))
         overlay.putalpha(alpha)
         return Image.alpha_composite(base_rgba, overlay).convert("RGB")
+
+    def _composite_selected_cells(self, base_img: Image.Image, editor: ImageEditor) -> Image.Image:
+        """Overlay selected cell boxes in blue (for OCR selection)."""
+        if not editor.selected_cell_indices or not editor.table_cell_boxes:
+            return base_img
+        base_rgba = base_img.convert("RGBA")
+        draw = ImageDraw.Draw(base_rgba, "RGBA")
+        for idx in editor.selected_cell_indices:
+            if 0 <= idx < len(editor.table_cell_boxes):
+                l, t, r, b = editor.table_cell_boxes[idx]
+                draw.rectangle([l, t, r, b], outline=(0, 120, 255, 255), width=2)
+                draw.rectangle([l, t, r, b], fill=(0, 120, 255, 40))
+        return base_rgba.convert("RGB")
     
     def _rotate(self, angle: float):
         """Rotate current image."""

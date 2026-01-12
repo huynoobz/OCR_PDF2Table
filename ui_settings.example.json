@@ -3,6 +3,7 @@
   "auto_fit_on_load": true,
   "show_toolbar_hint": true,
   "confirm_delete": true,
+  "ocr_lang": "eng",
   "keymap": {
     "open_pdf": "Ctrl+O",
     "export_selected": "Ctrl+Shift+E",
