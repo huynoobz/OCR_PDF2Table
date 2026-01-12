@@ -600,6 +600,7 @@ class ImageManagementUI:
         ttk.Button(btn_frame, text="Move Up", command=self._move_up).pack(fill=tk.X, pady=2)
         ttk.Button(btn_frame, text="Move Down", command=self._move_down).pack(fill=tk.X, pady=2)
         ttk.Button(btn_frame, text="Export Selected", command=self._export_selected).pack(fill=tk.X, pady=2)
+        ttk.Button(btn_frame, text="Export All", command=self._export_all).pack(fill=tk.X, pady=2)
         
         # Viewer frame
         viewer_frame = ttk.Frame(right_panel)
@@ -746,6 +747,7 @@ class ImageManagementUI:
         file_menu.add_command(label="Add External Image…", command=self._add_external_image)
         file_menu.add_separator()
         file_menu.add_command(label="Export Selected…", command=self._export_selected)
+        file_menu.add_command(label="Export All…", command=self._export_all)
         file_menu.add_command(label="Settings…", command=self._open_settings_window)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.destroy)
@@ -1528,6 +1530,16 @@ class ImageManagementUI:
             messagebox.showinfo("Success", f"Exported {len(selected)} image(s) to {folder}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export images: {str(e)}")
+
+    def _export_all(self):
+        """Export all images to a folder."""
+        if not self.processed_images:
+            messagebox.showwarning("Warning", "No images loaded")
+            return
+        # Select all temporarily and reuse export logic
+        self.image_listbox.selection_clear(0, tk.END)
+        self.image_listbox.selection_set(0, tk.END)
+        self._export_selected()
     
     def _update_listbox(self):
         """Update the image listbox."""
