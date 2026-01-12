@@ -10,7 +10,19 @@ from PIL import Image, ImageTk, ImageEnhance
 from typing import List, Optional, Dict
 import os
 import re
+import json
+from dataclasses import dataclass, asdict
 from module1_image_processing import ProcessedImage, PDFImageProcessor
+
+
+@dataclass
+class UISettings:
+    default_dpi: int = 300
+    auto_fit_on_load: bool = True
+    show_toolbar_hint: bool = True
+    confirm_delete: bool = True
+    # Friendly key strings (e.g. "Ctrl+O", "Tab") -> converted to Tk sequences at bind time
+    keymap: Optional[Dict[str, str]] = None
 
 
 class ImageViewer:
@@ -240,9 +252,17 @@ class ImageManagementUI:
         self.current_index = -1
         self.selected_indices: set = set()
         self.image_editors: Dict[int, ImageEditor] = {}
+
+        # Settings / shortcuts
+        self.settings_path = os.path.join(os.path.dirname(__file__), "ui_settings.json")
+        self.settings = self._load_settings()
+        self._settings_window: Optional[tk.Toplevel] = None
+        self._shortcut_bind_ids: Dict[str, str] = {}
         
         # Create UI
         self._create_ui()
+        self._apply_settings_to_ui()
+        self._bind_shortcuts()
     
     def _create_ui(self):
         """Create the user interface."""
@@ -412,6 +432,8 @@ class ImageManagementUI:
         self._update_listbox()
         if processed_images:
             self._display_current_image()
+            if getattr(self.settings, "auto_fit_on_load", False):
+                self.viewer.fit_to_window()
 
     # ----------------------------
     # Toolbar / Menus
@@ -425,6 +447,7 @@ class ImageManagementUI:
         file_menu.add_command(label="Add External Image…", command=self._add_external_image)
         file_menu.add_separator()
         file_menu.add_command(label="Export Selected…", command=self._export_selected)
+        file_menu.add_command(label="Settings…", command=self._open_settings_window)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.destroy)
         file_btn["menu"] = file_menu
@@ -453,14 +476,209 @@ class ImageManagementUI:
         select_menu.add_separator()
         select_menu.add_command(label="Odd pages (1,3,5,...)", command=self._select_odd)
         select_menu.add_command(label="Even pages (2,4,6,...)", command=self._select_even)
+        select_menu.add_separator()
+        select_menu.add_command(label="Wizard…", command=self._open_select_wizard_dialog)
         select_btn["menu"] = select_menu
         select_btn.pack(side=tk.LEFT, padx=(0, 6))
 
         # Quick hint
-        ttk.Label(
+        self._toolbar_hint_label = ttk.Label(
             parent,
             text="Tip: multi-select + edit applies to all selected. Pattern examples: 1-2, 1,3,5",
-        ).pack(side=tk.LEFT, padx=8)
+        )
+        self._toolbar_hint_label.pack(side=tk.LEFT, padx=8)
+
+    # ----------------------------
+    # Settings / Persistence
+    # ----------------------------
+    def _default_keymap(self) -> Dict[str, str]:
+        """
+        Photoshop-inspired defaults (approximate).
+        Friendly strings are converted to Tk sequences at bind time.
+        """
+        return {
+            "open_pdf": "Ctrl+O",
+            "export_selected": "Ctrl+Shift+E",
+            "settings": "Tab",
+            "settings_alt": "Ctrl+,",
+            "select_all": "Ctrl+A",
+            "select_none": "Ctrl+D",
+            "select_invert": "Ctrl+Shift+I",
+            "select_wizard": "Ctrl+Alt+S",
+            "select_odd": "Ctrl+Alt+O",
+            "select_even": "Ctrl+Alt+E",
+            "prev_page": "Left",
+            "next_page": "Right",
+            "zoom_in": "Ctrl++",
+            "zoom_out": "Ctrl+-",
+            "fit_to_window": "Ctrl+0",
+            "actual_size": "Ctrl+1",
+            "rotate_left": "Ctrl+L",
+            "rotate_right": "Ctrl+R",
+            "rotate_180": "Ctrl+Shift+R",
+            "reset_ops": "Ctrl+Alt+0",
+            "delete_selected": "Delete",
+            "start_crop": "C",
+            "clear_crop": "Shift+C",
+        }
+
+    def _load_settings(self) -> UISettings:
+        defaults = UISettings(
+            default_dpi=300,
+            auto_fit_on_load=True,
+            show_toolbar_hint=True,
+            confirm_delete=True,
+            keymap=self._default_keymap(),
+        )
+        try:
+            if os.path.exists(self.settings_path):
+                with open(self.settings_path, "r", encoding="utf-8") as f:
+                    data = json.load(f) or {}
+                # Merge with defaults
+                keymap = defaults.keymap.copy()
+                keymap.update(data.get("keymap") or {})
+                return UISettings(
+                    default_dpi=int(data.get("default_dpi", defaults.default_dpi)),
+                    auto_fit_on_load=bool(data.get("auto_fit_on_load", defaults.auto_fit_on_load)),
+                    show_toolbar_hint=bool(data.get("show_toolbar_hint", defaults.show_toolbar_hint)),
+                    confirm_delete=bool(data.get("confirm_delete", defaults.confirm_delete)),
+                    keymap=keymap,
+                )
+        except Exception:
+            pass
+        return defaults
+
+    def _save_settings(self):
+        try:
+            with open(self.settings_path, "w", encoding="utf-8") as f:
+                json.dump(asdict(self.settings), f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            messagebox.showerror("Settings", f"Failed to save settings: {e}")
+
+    def _apply_settings_to_ui(self):
+        # Toolbar hint visibility
+        if hasattr(self, "_toolbar_hint_label") and self._toolbar_hint_label is not None:
+            if self.settings.show_toolbar_hint:
+                self._toolbar_hint_label.pack(side=tk.LEFT, padx=8)
+            else:
+                self._toolbar_hint_label.pack_forget()
+
+    def _open_settings_window(self):
+        """Open Settings window with tabs (General, Shortcuts)."""
+        if self._settings_window is not None and self._settings_window.winfo_exists():
+            self._settings_window.lift()
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("Settings")
+        win.transient(self.root)
+        win.grab_set()
+        self._settings_window = win
+
+        container = ttk.Frame(win, padding="10")
+        container.pack(fill=tk.BOTH, expand=True)
+
+        nb = ttk.Notebook(container)
+        nb.pack(fill=tk.BOTH, expand=True)
+
+        # General tab
+        general = ttk.Frame(nb, padding="10")
+        nb.add(general, text="General")
+
+        dpi_var = tk.IntVar(value=int(self.settings.default_dpi))
+        auto_fit_var = tk.BooleanVar(value=bool(self.settings.auto_fit_on_load))
+        hint_var = tk.BooleanVar(value=bool(self.settings.show_toolbar_hint))
+        confirm_del_var = tk.BooleanVar(value=bool(self.settings.confirm_delete))
+
+        row = 0
+        ttk.Label(general, text="Default DPI (for Open PDF):").grid(row=row, column=0, sticky=tk.W, pady=4)
+        ttk.Entry(general, textvariable=dpi_var, width=10).grid(row=row, column=1, sticky=tk.W, pady=4)
+        row += 1
+
+        ttk.Checkbutton(general, text="Auto fit to window after load", variable=auto_fit_var).grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=4
+        )
+        row += 1
+
+        ttk.Checkbutton(general, text="Show toolbar hint text", variable=hint_var).grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=4
+        )
+        row += 1
+
+        ttk.Checkbutton(general, text="Confirm before delete", variable=confirm_del_var).grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=4
+        )
+        row += 1
+
+        # Shortcuts tab
+        shortcuts = ttk.Frame(nb, padding="10")
+        nb.add(shortcuts, text="Shortcuts")
+
+        ttk.Label(shortcuts, text="Edit shortcuts (examples: Ctrl+O, Ctrl+Shift+I, Tab, Delete, Left)").pack(
+            anchor=tk.W, pady=(0, 8)
+        )
+
+        # Build shortcut editor grid
+        key_vars: Dict[str, tk.StringVar] = {}
+        actions = [
+            ("open_pdf", "Open PDF"),
+            ("export_selected", "Export Selected"),
+            ("settings", "Settings (Tab)"),
+            ("settings_alt", "Settings (Ctrl+,)"),
+            ("select_wizard", "Select Wizard"),
+            ("select_all", "Select All"),
+            ("select_none", "Select None (Deselect)"),
+            ("select_invert", "Select Invert"),
+            ("select_odd", "Select Odd"),
+            ("select_even", "Select Even"),
+            ("prev_page", "Previous Page"),
+            ("next_page", "Next Page"),
+            ("zoom_in", "Zoom In"),
+            ("zoom_out", "Zoom Out"),
+            ("fit_to_window", "Fit to Window"),
+            ("actual_size", "Actual Size"),
+            ("rotate_left", "Rotate -90"),
+            ("rotate_right", "Rotate +90"),
+            ("rotate_180", "Rotate 180"),
+            ("reset_ops", "Reset operations"),
+            ("delete_selected", "Delete selected"),
+            ("start_crop", "Start crop"),
+            ("clear_crop", "Clear crop"),
+        ]
+
+        grid = ttk.Frame(shortcuts)
+        grid.pack(fill=tk.BOTH, expand=True)
+        grid.columnconfigure(1, weight=1)
+
+        for r, (action_id, label) in enumerate(actions):
+            ttk.Label(grid, text=label).grid(row=r, column=0, sticky=tk.W, pady=2, padx=(0, 8))
+            key_vars[action_id] = tk.StringVar(value=str((self.settings.keymap or {}).get(action_id, "")))
+            ttk.Entry(grid, textvariable=key_vars[action_id]).grid(row=r, column=1, sticky=(tk.W, tk.E), pady=2)
+
+        def apply_settings():
+            # Persist general
+            self.settings.default_dpi = max(50, int(dpi_var.get()))
+            self.settings.auto_fit_on_load = bool(auto_fit_var.get())
+            self.settings.show_toolbar_hint = bool(hint_var.get())
+            self.settings.confirm_delete = bool(confirm_del_var.get())
+
+            # Persist shortcuts
+            if self.settings.keymap is None:
+                self.settings.keymap = {}
+            for k, v in key_vars.items():
+                self.settings.keymap[k] = v.get().strip()
+
+            self._save_settings()
+            self._apply_settings_to_ui()
+            self._bind_shortcuts()
+            messagebox.showinfo("Settings", "Saved.")
+
+        btns = ttk.Frame(container)
+        btns.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(btns, text="Save", command=apply_settings).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Close", command=win.destroy).pack(side=tk.RIGHT, padx=(0, 8))
+
+        win.bind("<Escape>", lambda _e: win.destroy())
 
     # ----------------------------
     # Selection helpers
@@ -555,6 +773,49 @@ class ImageManagementUI:
             self._apply_selection_indices(indices)
         except Exception as e:
             messagebox.showerror("Select", str(e))
+
+    def _open_select_wizard_dialog(self):
+        """Open a wizard dialog for multi-select patterns (menu-accessible)."""
+        if not self.processed_images:
+            messagebox.showwarning("Select", "No images loaded.")
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("Select Wizard")
+        win.transient(self.root)
+        win.grab_set()
+
+        frm = ttk.Frame(win, padding="10")
+        frm.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frm, text="Pattern (examples: 1-2, 1,3,5, 1-3,8,10-12):").pack(anchor=tk.W)
+        var = tk.StringVar(value=self.select_pattern_var.get())
+        ent = ttk.Entry(frm, textvariable=var, width=40)
+        ent.pack(fill=tk.X, pady=(4, 8))
+        ent.focus_set()
+
+        btn_row1 = ttk.Frame(frm)
+        btn_row1.pack(fill=tk.X)
+        ttk.Button(btn_row1, text="All", command=lambda: self._select_all()).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
+        ttk.Button(btn_row1, text="None", command=lambda: self._select_none()).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=4)
+        ttk.Button(btn_row1, text="Invert", command=lambda: self._select_invert()).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
+
+        btn_row2 = ttk.Frame(frm)
+        btn_row2.pack(fill=tk.X, pady=(6, 0))
+        ttk.Button(btn_row2, text="Odd", command=lambda: self._select_odd()).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
+        ttk.Button(btn_row2, text="Even", command=lambda: self._select_even()).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
+
+        def apply_and_close():
+            self.select_pattern_var.set(var.get())
+            self._apply_selection_pattern()
+            win.destroy()
+
+        btn_row3 = ttk.Frame(frm)
+        btn_row3.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(btn_row3, text="Apply", command=apply_and_close).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
+        ttk.Button(btn_row3, text="Close", command=win.destroy).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
+
+        ent.bind("<Return>", lambda _e: apply_and_close())
     
     def _load_from_module1(self):
         """Load images by processing a PDF file."""
@@ -567,7 +828,7 @@ class ImageManagementUI:
         
         try:
             processor = PDFImageProcessor()
-            images = processor.process_pdf(pdf_path, dpi=300)
+            images = processor.process_pdf(pdf_path, dpi=int(self.settings.default_dpi))
             self.load_images(images)
             messagebox.showinfo("Success", f"Loaded {len(images)} pages from PDF")
         except Exception as e:
@@ -603,6 +864,10 @@ class ImageManagementUI:
         if not selected:
             messagebox.showwarning("Warning", "No images selected")
             return
+
+        if getattr(self.settings, "confirm_delete", True):
+            if not messagebox.askyesno("Delete", f"Delete {len(selected)} selected image(s)?"):
+                return
         
         # Delete in reverse order to maintain indices
         for idx in reversed(selected):
@@ -988,6 +1253,144 @@ class ImageManagementUI:
                 self.image_editors[idx].set_crop(None)
 
         self._display_current_image()
+
+    # ----------------------------
+    # Shortcut binding
+    # ----------------------------
+    def _tk_sequence_from_friendly(self, s: str) -> Optional[str]:
+        """
+        Convert friendly strings like:
+          - Ctrl+O
+          - Ctrl+Shift+I
+          - Tab
+          - Ctrl+,
+          - Ctrl++
+        into Tk sequences like <Control-o>.
+        """
+        if not s:
+            return None
+        s = s.strip()
+        if not s:
+            return None
+        if s.startswith("<") and s.endswith(">"):
+            return s
+
+        parts = [p.strip() for p in s.split("+") if p.strip()]
+        if not parts:
+            return None
+
+        mods = []
+        key = parts[-1]
+        mod_parts = parts[:-1]
+
+        mod_map = {
+            "ctrl": "Control",
+            "control": "Control",
+            "shift": "Shift",
+            "alt": "Alt",
+        }
+        for m in mod_parts:
+            mm = mod_map.get(m.lower())
+            if mm:
+                mods.append(mm)
+
+        key_map = {
+            "tab": "Tab",
+            "delete": "Delete",
+            "backspace": "BackSpace",
+            "esc": "Escape",
+            "escape": "Escape",
+            "left": "Left",
+            "right": "Right",
+            "up": "Up",
+            "down": "Down",
+            ",": "comma",
+            ".": "period",
+            "+": "plus",
+            "-": "minus",
+        }
+
+        # Handle Ctrl++ specifically (key part becomes empty with split); allow "Ctrl++" by detecting trailing plus
+        if s.endswith("++") and (len(parts) >= 2) and parts[-1] == "":
+            key = "+"
+
+        key = key_map.get(key.lower(), key)
+        if len(key) == 1:
+            key = key.lower()
+
+        seq = "<" + "-".join(mods + [key]) + ">"
+        return seq
+
+    def _should_ignore_shortcut(self, event: tk.Event) -> bool:
+        w = getattr(event, "widget", None)
+        if w is None:
+            return False
+        # Avoid stealing keystrokes while typing in inputs
+        if isinstance(w, (tk.Entry, ttk.Entry, tk.Text)):
+            return True
+        return False
+
+    def _bind_shortcuts(self):
+        # Unbind previous shortcuts
+        try:
+            for action_id, seq in list(self._shortcut_bind_ids.items()):
+                if seq:
+                    self.root.unbind_all(seq)
+        except Exception:
+            pass
+        self._shortcut_bind_ids = {}
+
+        keymap = self.settings.keymap or {}
+
+        def bind(action_id: str, friendly: str, handler, *, break_default: bool = True):
+            seq = self._tk_sequence_from_friendly(friendly)
+            if not seq:
+                return
+
+            def _wrapped(event):
+                # Special case: Tab should still work for focus traversal inside text inputs
+                if action_id in ("settings", "settings_alt"):
+                    if self._should_ignore_shortcut(event):
+                        return None
+                else:
+                    if self._should_ignore_shortcut(event):
+                        return None
+
+                handler()
+                return "break" if break_default else None
+
+            self.root.bind_all(seq, _wrapped)
+            self._shortcut_bind_ids[action_id] = seq
+
+        # Actions
+        bind("open_pdf", keymap.get("open_pdf", ""), self._load_from_module1)
+        bind("export_selected", keymap.get("export_selected", ""), self._export_selected)
+        bind("settings", keymap.get("settings", ""), self._open_settings_window)
+        bind("settings_alt", keymap.get("settings_alt", ""), self._open_settings_window)
+
+        bind("select_all", keymap.get("select_all", ""), self._select_all)
+        bind("select_none", keymap.get("select_none", ""), self._select_none)
+        bind("select_invert", keymap.get("select_invert", ""), self._select_invert)
+        bind("select_wizard", keymap.get("select_wizard", ""), self._open_select_wizard_dialog)
+        bind("select_odd", keymap.get("select_odd", ""), self._select_odd)
+        bind("select_even", keymap.get("select_even", ""), self._select_even)
+
+        bind("prev_page", keymap.get("prev_page", ""), self._prev_image)
+        bind("next_page", keymap.get("next_page", ""), self._next_image)
+
+        bind("zoom_in", keymap.get("zoom_in", ""), lambda: self.viewer.zoom_in())
+        bind("zoom_out", keymap.get("zoom_out", ""), lambda: self.viewer.zoom_out())
+        bind("fit_to_window", keymap.get("fit_to_window", ""), lambda: self.viewer.fit_to_window())
+        bind("actual_size", keymap.get("actual_size", ""), lambda: self.viewer.reset_view())
+
+        bind("rotate_left", keymap.get("rotate_left", ""), lambda: self._rotate(-90))
+        bind("rotate_right", keymap.get("rotate_right", ""), lambda: self._rotate(90))
+        bind("rotate_180", keymap.get("rotate_180", ""), lambda: self._rotate(180))
+        bind("reset_ops", keymap.get("reset_ops", ""), self._reset_operations)
+
+        bind("delete_selected", keymap.get("delete_selected", ""), self._delete_selected)
+        bind("start_crop", keymap.get("start_crop", ""), self._start_crop)
+        bind("clear_crop", keymap.get("clear_crop", ""), self._clear_crop)
 
 
 def main():
