@@ -545,11 +545,47 @@ class ImageManagementUI:
         self._pending_view_refresh_after_id: Optional[str] = None
         self._file_menu: Optional[tk.Menu] = None
         self._file_menu_ocr_index: Optional[int] = None
+        self._space_hand_active: bool = False
+        self._space_prev_tool: Optional[str] = None
         
         # Create UI
         self._create_ui()
         self._apply_settings_to_ui()
         self._bind_shortcuts()
+        self._bind_space_hand()
+
+    def _bind_space_hand(self):
+        """Hold Space to temporarily switch to Hand tool (Photoshop-like)."""
+        def on_press(event):
+            if self._should_ignore_shortcut(event):
+                return
+            if self._space_hand_active:
+                return
+            # Only activate if we're not already hand
+            if not hasattr(self, "active_tool"):
+                return
+            current = self.active_tool.get()
+            if current == "hand":
+                return
+            self._space_prev_tool = current
+            self._space_hand_active = True
+            self.active_tool.set("hand")
+            self._apply_active_tool()
+
+        def on_release(event):
+            if self._should_ignore_shortcut(event):
+                return
+            if not self._space_hand_active:
+                return
+            self._space_hand_active = False
+            if self._space_prev_tool and hasattr(self, "active_tool"):
+                self.active_tool.set(self._space_prev_tool)
+                self._space_prev_tool = None
+                self._apply_active_tool()
+
+        # bind_all so it works regardless of focus (except when typing)
+        self.root.bind_all("<KeyPress-space>", on_press)
+        self.root.bind_all("<KeyRelease-space>", on_release)
     
     def _create_ui(self):
         """Create the user interface."""
@@ -564,28 +600,20 @@ class ImageManagementUI:
         toolbar.columnconfigure(0, weight=1)
         self._create_toolbar(toolbar)
 
-        # Main container
-        main_frame = ttk.Frame(self.root, padding="5")
-        main_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        # Main container (PanedWindow for resizable sidebars)
+        main_pane = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
+        main_pane.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=5)
 
-        # Layout: [Tools | Viewer+controls | Image list]
-        main_frame.columnconfigure(0, weight=0)  # tools
-        main_frame.columnconfigure(1, weight=1)  # viewer
-        main_frame.columnconfigure(2, weight=0)  # list
-        main_frame.rowconfigure(0, weight=1)
+        tools_panel = ttk.Frame(main_pane, width=180)
+        right_panel = ttk.Frame(main_pane)
+        list_panel = ttk.Frame(main_pane, width=280)
 
-        # Left panel - Tools palette
-        tools_panel = ttk.Frame(main_frame, width=140)
-        tools_panel.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.W), padx=(0, 6))
+        # Allow user to drag sashes to resize
+        main_pane.add(tools_panel, weight=0)
+        main_pane.add(right_panel, weight=1)
+        main_pane.add(list_panel, weight=0)
+
         self._create_tools_panel(tools_panel)
-
-        # Center panel - Image viewer and controls
-        right_panel = ttk.Frame(main_frame)
-        right_panel.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N, tk.S))
-
-        # Right panel - Image list
-        list_panel = ttk.Frame(main_frame, width=240)
-        list_panel.grid(row=0, column=2, sticky=(tk.N, tk.S, tk.E), padx=(6, 0))
 
         list_label = ttk.Label(list_panel, text="Images")
         list_label.pack(fill=tk.X, pady=(0, 5))
