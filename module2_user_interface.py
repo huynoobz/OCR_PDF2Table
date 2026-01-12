@@ -1392,7 +1392,11 @@ class ImageManagementUI:
         status = ttk.Label(win, text="")
         status.pack(anchor=tk.W, padx=10, pady=(0, 8))
         pb = ttk.Progressbar(win, mode="determinate", maximum=max(1, len(self.processed_images)))
-        pb.pack(fill=tk.X, padx=10, pady=(0, 10))
+        pb.pack(fill=tk.X, padx=10, pady=(0, 6))
+
+        ttk.Label(win, text="Cell OCR progress:").pack(anchor=tk.W, padx=10)
+        pb_cells = ttk.Progressbar(win, mode="determinate", maximum=1)
+        pb_cells.pack(fill=tk.X, padx=10, pady=(0, 10))
         btns = ttk.Frame(win)
         btns.pack(fill=tk.X, padx=10, pady=(0, 10))
         ttk.Button(btns, text="Cancel", command=lambda: cancelled.__setitem__("v", True)).pack(side=tk.RIGHT)
@@ -1405,8 +1409,6 @@ class ImageManagementUI:
             self.root.update_idletasks()
 
             all_rows: List[List[str]] = []
-            max_cols = 0
-            skipped = 0
 
             for i in range(len(self.processed_images)):
                 if cancelled["v"]:
@@ -1418,30 +1420,30 @@ class ImageManagementUI:
                 win.update_idletasks()
 
                 editor = self._ensure_editor(i)
-                base = editor.get_base_image() or editor.get_current_image() or self.processed_images[i].pil_image
-                if base is None:
-                    skipped += 1
+                if editor.table_cells_mask is None:
+                    status.config(text=f"Page {page_num}: detecting table…")
+                    win.update_idletasks()
+                    ok = self._detect_table_for_index(i, show_masks=False)
+                    editor = self._ensure_editor(i)
+                    if not ok or editor.table_cells_mask is None:
+                        pb["value"] = i + 1
+                        win.update_idletasks()
+                        continue
+
+                self._ensure_cell_boxes(editor)
+                if not editor.table_cell_boxes:
                     pb["value"] = i + 1
                     win.update_idletasks()
                     continue
 
-                # Ensure table exists (auto-detect) for this page
-                ok = self._detect_table_for_index(i, show_masks=False)
-                editor = self._ensure_editor(i)
-                if not ok or editor.table_cells_mask is None:
-                    skipped += 1
+                base = editor.get_current_image()
+                if base is None:
                     pb["value"] = i + 1
                     win.update_idletasks()
                     continue
-                self._ensure_cell_boxes(editor)
-                if not editor.table_cell_boxes:
-                    skipped += 1
-                    pb["value"] = i + 1
-                    win.update_idletasks()
-                    continue
+
                 grid_boxes = self._build_table_grid_boxes(editor.table_cell_boxes)
                 if not grid_boxes:
-                    skipped += 1
                     pb["value"] = i + 1
                     win.update_idletasks()
                     continue
@@ -1449,22 +1451,21 @@ class ImageManagementUI:
                 status.config(text=f"Page {page_num} / {len(self.processed_images)}: OCR cells…")
                 win.update_idletasks()
 
-                table = self._ocr_table_grid(base, grid_boxes)
+                table = self._ocr_table_grid_with_progress(
+                    base,
+                    grid_boxes,
+                    win=win,
+                    status=status,
+                    pb=pb_cells,
+                    cancelled=cancelled,
+                    page_num=page_num,
+                )
                 if not table:
-                    skipped += 1
                     pb["value"] = i + 1
                     win.update_idletasks()
                     continue
 
-                # Keep one merged table: append rows per page. Normalize columns as we go.
-                page_cols = max((len(r) for r in table), default=0)
-                if page_cols > max_cols:
-                    for r in all_rows:
-                        r.extend([""] * (page_cols - max_cols))
-                    max_cols = page_cols
                 for r in table:
-                    if len(r) < max_cols:
-                        r = r + [""] * (max_cols - len(r))
                     all_rows.append(r)
 
                 pb["value"] = i + 1
@@ -1474,14 +1475,11 @@ class ImageManagementUI:
                 messagebox.showwarning("CSV", "Export cancelled.")
                 return
 
-            if not all_rows:
-                messagebox.showwarning("CSV", f"No tables exported. Skipped {skipped} page(s).")
-                return
 
             status.config(text="Writing CSV…")
             win.update_idletasks()
             self._write_csv(out_path, all_rows)
-            messagebox.showinfo("CSV", f"Saved merged CSV to:\n{out_path}\nSkipped {skipped} page(s) (no detected table).")
+            messagebox.showinfo("CSV", f"Saved merged CSV to:\n{out_path}.")
         except Exception as e:
             messagebox.showerror("CSV", f"Export failed: {e}")
         finally:
