@@ -340,6 +340,10 @@ class PDFImageProcessor:
         horizontal_kernel_len: Optional[int] = None,
         vertical_kernel_len: Optional[int] = None,
         kernel_scale: int = 30,
+        filter_non_table_lines: bool = True,
+        min_intersections_per_component: int = 2,
+        min_component_length_px: int = 50,
+        intersection_dilate_px: int = 3,
     ) -> np.ndarray:
         """
         Detect table grid lines and return a binary mask (uint8: 0/255).
@@ -405,6 +409,37 @@ class PDFImageProcessor:
         # Extract lines via morphological open
         horizontal_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel, iterations=1)
         vertical_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vertical_kernel, iterations=1)
+
+        if filter_non_table_lines:
+            # Keep only components that actually participate in a grid:
+            # a "table" line should intersect perpendicular lines multiple times.
+            k = max(1, int(intersection_dilate_px))
+            inter_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+            h_d = cv2.dilate(horizontal_lines, inter_kernel, iterations=1)
+            v_d = cv2.dilate(vertical_lines, inter_kernel, iterations=1)
+            intersections = cv2.bitwise_and(h_d, v_d)
+
+            def _filter_by_intersections(line_mask: np.ndarray, intersections_mask: np.ndarray, *, is_horizontal: bool) -> np.ndarray:
+                num, labels, stats, _ = cv2.connectedComponentsWithStats(line_mask, connectivity=8)
+                out = np.zeros_like(line_mask)
+                for label in range(1, num):
+                    x = stats[label, cv2.CC_STAT_LEFT]
+                    y = stats[label, cv2.CC_STAT_TOP]
+                    w_c = stats[label, cv2.CC_STAT_WIDTH]
+                    h_c = stats[label, cv2.CC_STAT_HEIGHT]
+                    # Length check (avoid tiny noise)
+                    length = w_c if is_horizontal else h_c
+                    if length < int(min_component_length_px):
+                        continue
+                    comp_mask = (labels[y : y + h_c, x : x + w_c] == label).astype(np.uint8) * 255
+                    inter_roi = intersections_mask[y : y + h_c, x : x + w_c]
+                    inter_count = cv2.countNonZero(cv2.bitwise_and(inter_roi, comp_mask))
+                    if inter_count >= int(min_intersections_per_component):
+                        out[y : y + h_c, x : x + w_c] = cv2.bitwise_or(out[y : y + h_c, x : x + w_c], comp_mask)
+                return out
+
+            horizontal_lines = _filter_by_intersections(horizontal_lines, intersections, is_horizontal=True)
+            vertical_lines = _filter_by_intersections(vertical_lines, intersections, is_horizontal=False)
 
         # Combine
         mask = cv2.bitwise_or(horizontal_lines, vertical_lines)
