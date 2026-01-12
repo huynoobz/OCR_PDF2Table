@@ -11,6 +11,7 @@ from typing import List, Optional, Dict
 import os
 import re
 import json
+import csv
 from dataclasses import dataclass, asdict
 from PIL import ImageDraw
 import numpy as np
@@ -33,6 +34,8 @@ class UISettings:
     m1_apply_deskew: bool = True
     m1_apply_contrast: bool = True
     m1_contrast_factor: float = 1.2
+    # CSV export
+    csv_delimiter: str = ","
     # Persisted UI layout (PanedWindow sash positions, pixels)
     sidebar_sash0: Optional[int] = None
     sidebar_sash1: Optional[int] = None
@@ -783,6 +786,9 @@ class ImageManagementUI:
         file_menu.add_command(label="Export All…", command=self._export_all)
         file_menu.add_separator()
         file_menu.add_command(label="OCR selected cells…", command=self._ocr_selected_cells)
+        file_menu.add_separator()
+        file_menu.add_command(label="Export table (CSV) - current page…", command=self._export_table_csv_current)
+        file_menu.add_command(label="Export table (CSV) - all pages…", command=self._export_table_csv_all)
         self._file_menu = file_menu
         self._file_menu_ocr_index = file_menu.index("end")
         file_menu.add_command(label="Settings…", command=self._open_settings_window)
@@ -987,6 +993,207 @@ class ImageManagementUI:
             return
         editor.selected_cell_indices = set()
         self._display_current_image()
+
+    # ----------------------------
+    # Export Table (CSV)
+    # ----------------------------
+    @staticmethod
+    def _median_int(vals: List[int], default: int) -> int:
+        if not vals:
+            return int(default)
+        s = sorted(int(v) for v in vals)
+        return int(s[len(s) // 2])
+
+    @staticmethod
+    def _cluster_centers(vals: List[int], threshold: int) -> List[int]:
+        """Cluster 1D values into groups and return cluster centers."""
+        if not vals:
+            return []
+        threshold = max(1, int(threshold))
+        vals_sorted = sorted(int(v) for v in vals)
+        clusters: List[List[int]] = [[vals_sorted[0]]]
+        for v in vals_sorted[1:]:
+            cur = clusters[-1]
+            cur_center = sum(cur) / max(1, len(cur))
+            if abs(v - cur_center) <= threshold:
+                cur.append(v)
+            else:
+                clusters.append([v])
+        centers = [int(round(sum(c) / max(1, len(c)))) for c in clusters]
+        return centers
+
+    def _build_table_grid_boxes(self, boxes: List[tuple[int, int, int, int]]) -> List[List[Optional[tuple[int, int, int, int]]]]:
+        """
+        Convert detected cell boxes into a (rows x cols) grid of boxes by clustering x/y centers.
+        Missing cells are None.
+        """
+        if not boxes:
+            return []
+
+        widths = [(r - l) for (l, _t, r, _b) in boxes]
+        heights = [(_b - _t) for (_l, _t, _r, _b) in boxes]
+        med_w = self._median_int(widths, 50)
+        med_h = self._median_int(heights, 20)
+        thresh_x = max(10, int(med_w * 0.6))
+        thresh_y = max(10, int(med_h * 0.6))
+
+        x_centers = [int((l + r) / 2) for (l, _t, r, _b) in boxes]
+        y_centers = [int((_t + _b) / 2) for (_l, _t, _r, _b) in boxes]
+
+        col_centers = self._cluster_centers(x_centers, thresh_x)
+        row_centers = self._cluster_centers(y_centers, thresh_y)
+        if not col_centers or not row_centers:
+            return []
+
+        # Map cells to nearest row/col center; if collision, keep smallest area
+        def nearest_idx(v: int, centers: List[int]) -> int:
+            best_i = 0
+            best_d = abs(v - centers[0])
+            for i in range(1, len(centers)):
+                d = abs(v - centers[i])
+                if d < best_d:
+                    best_d = d
+                    best_i = i
+            return best_i
+
+        grid: List[List[Optional[tuple[int, int, int, int]]]] = [
+            [None for _ in range(len(col_centers))] for _ in range(len(row_centers))
+        ]
+
+        for (l, t, r, b), xc, yc in zip(boxes, x_centers, y_centers):
+            rr = nearest_idx(yc, row_centers)
+            cc = nearest_idx(xc, col_centers)
+            area = max(1, (r - l) * (b - t))
+            existing = grid[rr][cc]
+            if existing is None:
+                grid[rr][cc] = (l, t, r, b)
+            else:
+                el, et, er, eb = existing
+                earea = max(1, (er - el) * (eb - et))
+                if area < earea:
+                    grid[rr][cc] = (l, t, r, b)
+
+        return grid
+
+    def _ocr_table_grid(self, base: Image.Image, grid_boxes: List[List[Optional[tuple[int, int, int, int]]]]) -> List[List[str]]:
+        lang = str(getattr(self.settings, "ocr_lang", "eng") or "eng").strip()
+        out: List[List[str]] = []
+        for row in grid_boxes:
+            out_row: List[str] = []
+            for box in row:
+                if box is None:
+                    out_row.append("")
+                    continue
+                l, t, r, b = box
+                crop = base.crop((l, t, r, b))
+                text = ocr_image_pil(crop, config=OCRConfig(lang=lang, psm=6))
+                out_row.append((text or "").strip())
+            out.append(out_row)
+        return out
+
+    def _write_csv(self, path: str, table: List[List[str]]):
+        delim = str(getattr(self.settings, "csv_delimiter", ",") or ",")
+        if delim.lower() in ("\\t", "tab"):
+            delim = "\t"
+        if len(delim) != 1:
+            delim = ","
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(
+                f,
+                delimiter=delim,
+                quotechar='"',
+                quoting=csv.QUOTE_ALL,  # always quote so newlines are safe and consistent
+                lineterminator="\n",
+            )
+            for row in table:
+                w.writerow(row)
+
+    def _export_table_csv_current(self):
+        if self.current_index < 0 or self.current_index >= len(self.processed_images):
+            messagebox.showwarning("CSV", "No page selected.")
+            return
+        editor = self._ensure_editor(self.current_index)
+        if editor.table_cells_mask is None:
+            messagebox.showwarning("CSV", "No table detected for this page. Run Edit → Detect table first.")
+            return
+        self._ensure_cell_boxes(editor)
+        if not editor.table_cell_boxes:
+            messagebox.showwarning("CSV", "No cells found. Run Edit → Detect table first.")
+            return
+        base = editor.get_base_image() or editor.get_current_image()
+        if base is None:
+            messagebox.showerror("CSV", "No image data available.")
+            return
+
+        out_path = filedialog.asksaveasfilename(
+            title="Save table CSV (current page)",
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv"), ("All files", "*.*")],
+        )
+        if not out_path:
+            return
+
+        try:
+            self.root.config(cursor="watch")
+            self.root.update_idletasks()
+            grid_boxes = self._build_table_grid_boxes(editor.table_cell_boxes)
+            if not grid_boxes:
+                messagebox.showerror("CSV", "Failed to build a table grid from detected cells.")
+                return
+            table = self._ocr_table_grid(base, grid_boxes)
+            self._write_csv(out_path, table)
+            messagebox.showinfo("CSV", f"Saved CSV to:\n{out_path}")
+        except Exception as e:
+            messagebox.showerror("CSV", f"Export failed: {e}")
+        finally:
+            try:
+                self.root.config(cursor="")
+            except Exception:
+                pass
+
+    def _export_table_csv_all(self):
+        if not self.processed_images:
+            messagebox.showwarning("CSV", "No images loaded.")
+            return
+        out_dir = filedialog.askdirectory(title="Select output folder for CSV files")
+        if not out_dir:
+            return
+
+        try:
+            self.root.config(cursor="watch")
+            self.root.update_idletasks()
+            exported = 0
+            skipped = 0
+            for idx, processed in enumerate(self.processed_images):
+                editor = self._ensure_editor(idx)
+                if editor.table_cells_mask is None:
+                    skipped += 1
+                    continue
+                self._ensure_cell_boxes(editor)
+                if not editor.table_cell_boxes:
+                    skipped += 1
+                    continue
+                base = editor.get_base_image() or editor.get_current_image() or processed.pil_image
+                if base is None:
+                    skipped += 1
+                    continue
+                grid_boxes = self._build_table_grid_boxes(editor.table_cell_boxes)
+                if not grid_boxes:
+                    skipped += 1
+                    continue
+                table = self._ocr_table_grid(base, grid_boxes)
+                out_path = os.path.join(out_dir, f"page_{processed.metadata.page_number:03d}.csv")
+                self._write_csv(out_path, table)
+                exported += 1
+
+            messagebox.showinfo("CSV", f"Exported {exported} CSV file(s).\nSkipped {skipped} page(s) (no detected table).")
+        except Exception as e:
+            messagebox.showerror("CSV", f"Export failed: {e}")
+        finally:
+            try:
+                self.root.config(cursor="")
+            except Exception:
+                pass
 
     def _ensure_editor(self, idx: int) -> ImageEditor:
         if idx not in self.image_editors:
@@ -1231,6 +1438,7 @@ class ImageManagementUI:
             m1_apply_deskew=True,
             m1_apply_contrast=True,
             m1_contrast_factor=1.2,
+            csv_delimiter=",",
             sidebar_sash0=None,
             sidebar_sash1=None,
             keymap=self._default_keymap(),
@@ -1246,6 +1454,12 @@ class ImageManagementUI:
                 sash1 = data.get("sidebar_sash1", defaults.sidebar_sash1)
                 sash0 = int(sash0) if sash0 is not None else None
                 sash1 = int(sash1) if sash1 is not None else None
+                csv_delim = data.get("csv_delimiter", defaults.csv_delimiter)
+                csv_delim = str(csv_delim) if csv_delim is not None else defaults.csv_delimiter
+                if csv_delim.lower() in ("\\t", "tab"):
+                    csv_delim = "\t"
+                if len(csv_delim) != 1:
+                    csv_delim = defaults.csv_delimiter
                 return UISettings(
                     default_dpi=int(data.get("default_dpi", defaults.default_dpi)),
                     auto_fit_on_load=bool(data.get("auto_fit_on_load", defaults.auto_fit_on_load)),
@@ -1258,6 +1472,7 @@ class ImageManagementUI:
                     m1_apply_deskew=bool(data.get("m1_apply_deskew", defaults.m1_apply_deskew)),
                     m1_apply_contrast=bool(data.get("m1_apply_contrast", defaults.m1_apply_contrast)),
                     m1_contrast_factor=float(data.get("m1_contrast_factor", defaults.m1_contrast_factor)),
+                    csv_delimiter=csv_delim,
                     sidebar_sash0=sash0,
                     sidebar_sash1=sash1,
                     keymap=keymap,
@@ -1309,6 +1524,7 @@ class ImageManagementUI:
         confirm_del_var = tk.BooleanVar(value=bool(self.settings.confirm_delete))
         history_max_var = tk.IntVar(value=int(getattr(self.settings, "history_max_steps", 50)))
         ocr_lang_var = tk.StringVar(value=str(getattr(self.settings, "ocr_lang", "eng")))
+        csv_delim_var = tk.StringVar(value=str(getattr(self.settings, "csv_delimiter", ",")))
 
         row = 0
         ttk.Label(general, text="Default DPI (for Open PDF):").grid(row=row, column=0, sticky=tk.W, pady=4)
@@ -1336,6 +1552,10 @@ class ImageManagementUI:
 
         ttk.Label(general, text="OCR language (Tesseract lang code):").grid(row=row, column=0, sticky=tk.W, pady=4)
         ttk.Entry(general, textvariable=ocr_lang_var, width=20).grid(row=row, column=1, sticky=tk.W, pady=4)
+        row += 1
+
+        ttk.Label(general, text="CSV delimiter (one char, or 'tab'):").grid(row=row, column=0, sticky=tk.W, pady=4)
+        ttk.Entry(general, textvariable=csv_delim_var, width=20).grid(row=row, column=1, sticky=tk.W, pady=4)
         row += 1
 
         ttk.Separator(general).grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 8))
@@ -1422,6 +1642,13 @@ class ImageManagementUI:
             self.settings.confirm_delete = bool(confirm_del_var.get())
             self.settings.history_max_steps = max(5, int(history_max_var.get()))
             self.settings.ocr_lang = (ocr_lang_var.get() or "eng").strip()
+            delim = (csv_delim_var.get() or ",").strip()
+            if delim.lower() in ("\\t", "tab"):
+                delim = "\t"
+            if len(delim) != 1:
+                messagebox.showwarning("Settings", "CSV delimiter must be exactly 1 character (or 'tab'). Using ','.")
+                delim = ","
+            self.settings.csv_delimiter = delim
             self.settings.m1_apply_grayscale = bool(m1_gray_var.get())
             self.settings.m1_apply_denoise = bool(m1_denoise_var.get())
             self.settings.m1_apply_deskew = bool(m1_deskew_var.get())

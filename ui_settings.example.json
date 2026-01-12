@@ -8,6 +8,7 @@
   "m1_apply_deskew": true,
   "m1_apply_contrast": true,
   "m1_contrast_factor": 1.2,
+  "csv_delimiter": ",",
   "sidebar_sash0": null,
   "sidebar_sash1": null,
   "ocr_lang": "eng",
