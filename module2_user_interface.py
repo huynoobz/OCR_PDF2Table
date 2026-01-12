@@ -36,6 +36,7 @@ class UISettings:
     m1_contrast_factor: float = 1.2
     # CSV export
     csv_delimiter: str = ","
+    csv_insert_prefix_quote: bool = False  # prefix "'" for Excel-like "force text"
     # Persisted UI layout (PanedWindow sash positions, pixels)
     sidebar_sash0: Optional[int] = None
     sidebar_sash1: Optional[int] = None
@@ -1077,6 +1078,7 @@ class ImageManagementUI:
 
     def _ocr_table_grid(self, base: Image.Image, grid_boxes: List[List[Optional[tuple[int, int, int, int]]]]) -> List[List[str]]:
         lang = str(getattr(self.settings, "ocr_lang", "eng") or "eng").strip()
+        prefix_quote = bool(getattr(self.settings, "csv_insert_prefix_quote", False))
         out: List[List[str]] = []
         for row in grid_boxes:
             out_row: List[str] = []
@@ -1087,7 +1089,10 @@ class ImageManagementUI:
                 l, t, r, b = box
                 crop = base.crop((l, t, r, b))
                 text = ocr_image_pil(crop, config=OCRConfig(lang=lang, psm=6))
-                out_row.append((text or "").strip())
+                val = (text or "").strip()
+                if prefix_quote and val and not val.startswith("'"):
+                    val = "'" + val
+                out_row.append(val)
             out.append(out_row)
         return out
 
@@ -1538,6 +1543,7 @@ class ImageManagementUI:
             m1_apply_contrast=True,
             m1_contrast_factor=1.2,
             csv_delimiter=",",
+            csv_insert_prefix_quote=False,
             sidebar_sash0=None,
             sidebar_sash1=None,
             keymap=self._default_keymap(),
@@ -1559,6 +1565,7 @@ class ImageManagementUI:
                     csv_delim = "\t"
                 if len(csv_delim) != 1:
                     csv_delim = defaults.csv_delimiter
+                prefix_q = bool(data.get("csv_insert_prefix_quote", defaults.csv_insert_prefix_quote))
                 return UISettings(
                     default_dpi=int(data.get("default_dpi", defaults.default_dpi)),
                     auto_fit_on_load=bool(data.get("auto_fit_on_load", defaults.auto_fit_on_load)),
@@ -1572,6 +1579,7 @@ class ImageManagementUI:
                     m1_apply_contrast=bool(data.get("m1_apply_contrast", defaults.m1_apply_contrast)),
                     m1_contrast_factor=float(data.get("m1_contrast_factor", defaults.m1_contrast_factor)),
                     csv_delimiter=csv_delim,
+                    csv_insert_prefix_quote=prefix_q,
                     sidebar_sash0=sash0,
                     sidebar_sash1=sash1,
                     keymap=keymap,
@@ -1624,6 +1632,7 @@ class ImageManagementUI:
         history_max_var = tk.IntVar(value=int(getattr(self.settings, "history_max_steps", 50)))
         ocr_lang_var = tk.StringVar(value=str(getattr(self.settings, "ocr_lang", "eng")))
         csv_delim_var = tk.StringVar(value=str(getattr(self.settings, "csv_delimiter", ",")))
+        csv_prefix_quote_var = tk.BooleanVar(value=bool(getattr(self.settings, "csv_insert_prefix_quote", False)))
 
         row = 0
         ttk.Label(general, text="Default DPI (for Open PDF):").grid(row=row, column=0, sticky=tk.W, pady=4)
@@ -1655,6 +1664,11 @@ class ImageManagementUI:
 
         ttk.Label(general, text="CSV delimiter (one char, or 'tab'):").grid(row=row, column=0, sticky=tk.W, pady=4)
         ttk.Entry(general, textvariable=csv_delim_var, width=20).grid(row=row, column=1, sticky=tk.W, pady=4)
+        row += 1
+
+        ttk.Checkbutton(general, text="Insert prefix \"'\" for CSV cells (Excel text)", variable=csv_prefix_quote_var).grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=4
+        )
         row += 1
 
         ttk.Separator(general).grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 8))
@@ -1748,6 +1762,7 @@ class ImageManagementUI:
                 messagebox.showwarning("Settings", "CSV delimiter must be exactly 1 character (or 'tab'). Using ','.")
                 delim = ","
             self.settings.csv_delimiter = delim
+            self.settings.csv_insert_prefix_quote = bool(csv_prefix_quote_var.get())
             self.settings.m1_apply_grayscale = bool(m1_gray_var.get())
             self.settings.m1_apply_denoise = bool(m1_denoise_var.get())
             self.settings.m1_apply_deskew = bool(m1_deskew_var.get())
