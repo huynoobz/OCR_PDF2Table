@@ -897,12 +897,19 @@ class ImageManagementUI:
         _, bin_mask = cv2.threshold(mask, 0, 255, cv2.THRESH_BINARY)
         num, labels, stats, _ = cv2.connectedComponentsWithStats(bin_mask, connectivity=8)
         boxes: List[tuple[int, int, int, int]] = []
+        h_img, w_img = bin_mask.shape[:2]
+        img_area = max(1, int(w_img * h_img))
         for label in range(1, num):
             x = int(stats[label, cv2.CC_STAT_LEFT])
             y = int(stats[label, cv2.CC_STAT_TOP])
             w = int(stats[label, cv2.CC_STAT_WIDTH])
             h = int(stats[label, cv2.CC_STAT_HEIGHT])
             if w < 5 or h < 5:
+                continue
+            # Exclude giant "background cell" components that touch borders
+            if x <= 0 or y <= 0 or (x + w) >= (w_img - 1) or (y + h) >= (h_img - 1):
+                continue
+            if int(w * h) > int(0.70 * img_area):
                 continue
             boxes.append((x, y, x + w, y + h))
         editor.table_cell_boxes = boxes
@@ -1409,7 +1416,6 @@ class ImageManagementUI:
             self.root.update_idletasks()
 
             all_rows: List[List[str]] = []
-            max_cols = 0
 
             for i in range(len(self.processed_images)):
                 if cancelled["v"]:
@@ -1466,16 +1472,7 @@ class ImageManagementUI:
                     win.update_idletasks()
                     continue
 
-                # Normalize column count so missing cells don't shift columns in merged CSV.
-                page_cols = max((len(r) for r in table), default=0)
-                if page_cols > max_cols:
-                    for r0 in all_rows:
-                        r0.extend([""] * (page_cols - max_cols))
-                    max_cols = page_cols
-
                 for r in table:
-                    if len(r) < max_cols:
-                        r = r + [""] * (max_cols - len(r))
                     all_rows.append(r)
 
                 pb["value"] = i + 1

@@ -574,6 +574,7 @@ class PDFImageProcessor:
         max_cell_area_ratio: float = 0.90,
         min_cell_width_px: int = 10,
         min_cell_height_px: int = 10,
+        exclude_border_touching: bool = True,
     ) -> np.ndarray:
         """
         Derive a cell-interior mask from a *precomputed* table line mask.
@@ -637,6 +638,10 @@ class PDFImageProcessor:
             ch = int(stats[label, cv2.CC_STAT_HEIGHT])
             if cw < int(min_cell_width_px) or ch < int(min_cell_height_px):
                 continue
+            # The "background" component typically touches the ROI border; exclude it to avoid a giant cell region.
+            if bool(exclude_border_touching):
+                if x <= 0 or y <= 0 or (x + cw) >= (roi_inv.shape[1] - 1) or (y + ch) >= (roi_inv.shape[0] - 1):
+                    continue
             comp = (labels == label).astype(np.uint8) * 255
             cells_roi = cv2.bitwise_or(cells_roi, comp)
 
