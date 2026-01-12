@@ -524,16 +524,10 @@ class ImageManagementUI:
         self._shortcut_bind_ids: Dict[str, str] = {}
         # Used by the Select Wizard dialog (menu); kept even if the left-panel wizard is hidden.
         self.select_pattern_var = tk.StringVar(value="")
-        self.show_table_mask_var = tk.BooleanVar(value=False)
-        self.show_table_cells_var = tk.BooleanVar(value=False)
 
         # Preserve per-page view (zoom/pan) so switching pages doesn't reset.
         self._view_state_by_index: Dict[int, tuple[float, int, int]] = {}
         self._viewer_current_index: Optional[int] = None
-
-        # History panel
-        self._history_window: Optional[tk.Toplevel] = None
-        self._history_listbox: Optional[tk.Listbox] = None
         self._pending_view_refresh_after_id: Optional[str] = None
         
         # Create UI
@@ -635,8 +629,8 @@ class ImageManagementUI:
         ttk.Button(nav_frame, text="Zoom In", command=self.viewer.zoom_in).pack(side=tk.LEFT, padx=2)
         ttk.Button(nav_frame, text="Zoom Out", command=self.viewer.zoom_out).pack(side=tk.LEFT, padx=2)
         
-        # Image operations frame
-        ops_frame = ttk.LabelFrame(right_panel, text="Image Operations", padding="10")
+        # Rotate frame (editing kept only for rotate)
+        ops_frame = ttk.LabelFrame(right_panel, text="Rotate", padding="10")
         ops_frame.pack(fill=tk.X, pady=5)
         
         # Rotation
@@ -646,36 +640,6 @@ class ImageManagementUI:
         ttk.Button(rot_frame, text="↺ -90°", command=lambda: self._rotate(-90)).pack(side=tk.LEFT, padx=2)
         ttk.Button(rot_frame, text="↻ +90°", command=lambda: self._rotate(90)).pack(side=tk.LEFT, padx=2)
         ttk.Button(rot_frame, text="180°", command=lambda: self._rotate(180)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(rot_frame, text="Reset", command=self._reset_operations).pack(side=tk.LEFT, padx=5)
-        
-        # Brightness
-        bright_frame = ttk.Frame(ops_frame)
-        bright_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(bright_frame, text="Brightness:").pack(side=tk.LEFT, padx=5)
-        self.brightness_var = tk.DoubleVar(value=1.0)
-        brightness_scale = ttk.Scale(bright_frame, from_=0.5, to=2.0, variable=self.brightness_var, 
-                                     orient=tk.HORIZONTAL, length=200, command=self._on_brightness_change)
-        brightness_scale.pack(side=tk.LEFT, padx=5)
-        self.brightness_label = ttk.Label(bright_frame, text="1.00")
-        self.brightness_label.pack(side=tk.LEFT, padx=5)
-        
-        # Contrast
-        contrast_frame = ttk.Frame(ops_frame)
-        contrast_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(contrast_frame, text="Contrast:").pack(side=tk.LEFT, padx=5)
-        self.contrast_var = tk.DoubleVar(value=1.0)
-        contrast_scale = ttk.Scale(contrast_frame, from_=0.5, to=2.0, variable=self.contrast_var,
-                                   orient=tk.HORIZONTAL, length=200, command=self._on_contrast_change)
-        contrast_scale.pack(side=tk.LEFT, padx=5)
-        self.contrast_label = ttk.Label(contrast_frame, text="1.00")
-        self.contrast_label.pack(side=tk.LEFT, padx=5)
-        
-        # Crop
-        crop_frame = ttk.Frame(ops_frame)
-        crop_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(crop_frame, text="Crop:").pack(side=tk.LEFT, padx=5)
-        ttk.Button(crop_frame, text="Select Crop Area", command=self._start_crop).pack(side=tk.LEFT, padx=2)
-        ttk.Button(crop_frame, text="Clear Crop", command=self._clear_crop).pack(side=tk.LEFT, padx=2)
         
         # Metadata display
         meta_frame = ttk.LabelFrame(right_panel, text="Metadata", padding="10")
@@ -721,29 +685,9 @@ class ImageManagementUI:
 
         tool_btn("Hand (Pan)", "hand")
         tool_btn("Zoom", "zoom")
-        tool_btn("Crop", "crop")
-        tool_btn("Brush", "brush")
-        tool_btn("Eyedropper", "eyedropper")
 
         ttk.Separator(parent).pack(fill=tk.X, pady=8)
 
-        # Brush controls
-        ttk.Label(parent, text="Brush size").pack(anchor=tk.W)
-        self.brush_size_var = tk.IntVar(value=10)
-        ttk.Scale(
-            parent,
-            from_=1,
-            to=50,
-            orient=tk.HORIZONTAL,
-            command=lambda v: self._set_brush_size(int(float(v))),
-        ).pack(fill=tk.X, pady=(2, 6))
-
-        ttk.Label(parent, text="Brush color").pack(anchor=tk.W)
-        self._brush_color_preview = tk.Label(parent, text="      ", bg="#ff0000", relief=tk.SOLID, bd=1)
-        self._brush_color_preview.pack(anchor=tk.W, pady=(2, 4))
-        ttk.Button(parent, text="Clear paint", command=self._clear_paint_selected).pack(fill=tk.X, pady=(2, 0))
-
-        ttk.Separator(parent).pack(fill=tk.X, pady=8)
         ttk.Button(parent, text="Settings…", command=self._open_settings_window).pack(fill=tk.X, pady=2)
 
         # Apply tool bindings now that canvas exists
@@ -767,11 +711,6 @@ class ImageManagementUI:
             self.viewer._bind_viewer_events()
             return
 
-        if tool == "crop":
-            self.canvas.config(cursor="crosshair")
-            self._start_crop()
-            return
-
         if tool == "zoom":
             self.canvas.config(cursor="plus")
 
@@ -784,59 +723,6 @@ class ImageManagementUI:
             # Left click zooms in, right click zooms out
             self.canvas.bind("<Button-1>", lambda e: zoom_in_click(e))
             self.canvas.bind("<Button-3>", lambda e: zoom_out_click(e))
-            # Keep wheel zoom from viewer
-            self.canvas.bind("<MouseWheel>", self.viewer.on_wheel)
-            self.canvas.bind("<Button-4>", self.viewer.on_wheel)
-            self.canvas.bind("<Button-5>", self.viewer.on_wheel)
-            return
-
-        if tool == "eyedropper":
-            self.canvas.config(cursor="tcross")
-
-            def pick(event):
-                self._eyedropper_pick(event.x, event.y)
-
-            self.canvas.bind("<Button-1>", pick)
-            # Keep wheel zoom from viewer
-            self.canvas.bind("<MouseWheel>", self.viewer.on_wheel)
-            self.canvas.bind("<Button-4>", self.viewer.on_wheel)
-            self.canvas.bind("<Button-5>", self.viewer.on_wheel)
-            return
-
-        if tool == "brush":
-            self.canvas.config(cursor="pencil")
-            self._brush_last_pt = None
-            self._brush_batch_targets = None
-
-            def start(event):
-                targets = self._get_selected_indices_or_current()
-                self._brush_batch_targets = targets
-                # Begin history batch per target so one stroke = one undo step
-                for idx in targets:
-                    editor = self._ensure_editor(idx)
-                    editor.begin_batch("Brush")
-                self._brush_last_pt = self._canvas_to_image_xy(event.x, event.y)
-
-            def move(event):
-                if self._brush_last_pt is None:
-                    return
-                p2 = self._canvas_to_image_xy(event.x, event.y)
-                if p2 is None:
-                    return
-                self._paint_line_on_selected(self._brush_last_pt, p2)
-                self._brush_last_pt = p2
-
-            def end(_event):
-                if self._brush_batch_targets:
-                    for idx in self._brush_batch_targets:
-                        if idx in self.image_editors:
-                            self.image_editors[idx].end_batch()
-                self._brush_batch_targets = None
-                self._brush_last_pt = None
-
-            self.canvas.bind("<Button-1>", start)
-            self.canvas.bind("<B1-Motion>", move)
-            self.canvas.bind("<ButtonRelease-1>", end)
             # Keep wheel zoom from viewer
             self.canvas.bind("<MouseWheel>", self.viewer.on_wheel)
             self.canvas.bind("<Button-4>", self.viewer.on_wheel)
@@ -864,25 +750,9 @@ class ImageManagementUI:
         # Edit menu
         edit_btn = ttk.Menubutton(parent, text="Edit")
         edit_menu = tk.Menu(edit_btn, tearoff=0)
-        edit_menu.add_command(label="Undo", command=self._undo_selected)
-        edit_menu.add_command(label="Redo", command=self._redo_selected)
-        edit_menu.add_command(label="History…", command=self._open_history_window)
-        edit_menu.add_separator()
         edit_menu.add_command(label="Rotate -90°", command=lambda: self._rotate(-90))
         edit_menu.add_command(label="Rotate +90°", command=lambda: self._rotate(90))
         edit_menu.add_command(label="Rotate 180°", command=lambda: self._rotate(180))
-        edit_menu.add_separator()
-        edit_menu.add_command(label="Detect table lines", command=self._detect_table_selected)
-        edit_menu.add_checkbutton(label="Show table mask", onvalue=True, offvalue=False, variable=self.show_table_mask_var, command=self._refresh_view)
-        edit_menu.add_command(label="Detect table cells mask", command=self._detect_table_cells_selected)
-        edit_menu.add_checkbutton(label="Show cells mask", onvalue=True, offvalue=False, variable=self.show_table_cells_var, command=self._refresh_view)
-        edit_menu.add_separator()
-        edit_menu.add_command(label="Reset operations", command=self._reset_operations)
-        edit_menu.add_command(label="Clear crop", command=self._clear_crop)
-        edit_menu.add_command(label="Clear table mask", command=self._clear_table_mask_selected)
-        edit_menu.add_command(label="Clear cells mask", command=self._clear_table_cells_mask_selected)
-        edit_menu.add_separator()
-        edit_menu.add_command(label="Delete selected", command=self._delete_selected)
         edit_btn["menu"] = edit_menu
         edit_btn.pack(side=tk.LEFT, padx=(0, 6))
 
@@ -1010,72 +880,7 @@ class ImageManagementUI:
                 self.image_editors[idx].clear_paint()
         self._display_current_image()
 
-    # ----------------------------
-    # Table detection (mask)
-    # ----------------------------
-    def _detect_table_selected(self):
-        """Compute table line mask for all selected images (or current)."""
-        targets = self._get_selected_indices_or_current()
-        if not targets:
-            messagebox.showwarning("Detect table", "No images selected.")
-            return
-
-        for idx in targets:
-            editor = self._ensure_editor(idx)
-            base = editor.get_base_image()
-            if base is None:
-                base = editor.get_current_image()
-            if base is None:
-                continue
-
-            # Use Module 1 logic to compute mask
-            img_np = np.array(base.convert("RGB"))
-            mask = PDFImageProcessor.detect_table_lines(img_np)
-            mask_pil = Image.fromarray(mask, mode="L")
-            editor.set_table_mask(mask_pil)
-
-        # Auto-enable display
-        self.show_table_mask_var.set(True)
-        self._display_current_image()
-
-    def _detect_table_cells_selected(self):
-        """Compute table cells mask for all selected images (or current)."""
-        targets = self._get_selected_indices_or_current()
-        if not targets:
-            messagebox.showwarning("Detect table", "No images selected.")
-            return
-
-        for idx in targets:
-            editor = self._ensure_editor(idx)
-            base = editor.get_base_image()
-            if base is None:
-                base = editor.get_current_image()
-            if base is None:
-                continue
-            img_np = np.array(base.convert("RGB"))
-            cells = PDFImageProcessor.detect_table_cells_mask(img_np)
-            editor.set_table_cells_mask(Image.fromarray(cells, mode="L"))
-
-        self.show_table_cells_var.set(True)
-        self._display_current_image()
-
-    def _clear_table_mask_selected(self):
-        targets = self._get_selected_indices_or_current()
-        if not targets:
-            return
-        for idx in targets:
-            if idx in self.image_editors:
-                self.image_editors[idx].set_table_mask(None)
-        self._display_current_image()
-
-    def _clear_table_cells_mask_selected(self):
-        targets = self._get_selected_indices_or_current()
-        if not targets:
-            return
-        for idx in targets:
-            if idx in self.image_editors:
-                self.image_editors[idx].set_table_cells_mask(None)
-        self._display_current_image()
+    # (Table detection UI removed)
 
     # ----------------------------
     # Undo / Redo / History panel
@@ -1169,10 +974,6 @@ class ImageManagementUI:
             "export_selected": "Ctrl+Shift+E",
             "settings": "Tab",
             "settings_alt": "Ctrl+,",
-            "undo": "Ctrl+Z",
-            "redo": "Ctrl+Y",
-            "redo_alt": "Ctrl+Shift+Z",
-            "history_panel": "F9",
             "select_all": "Ctrl+A",
             "select_none": "Ctrl+D",
             "select_invert": "Ctrl+Shift+I",
@@ -1190,17 +991,11 @@ class ImageManagementUI:
             "rotate_180": "Ctrl+Shift+R",
             "reset_ops": "Ctrl+Alt+0",
             "delete_selected": "Delete",
-            # Tool shortcuts (Photoshop-like)
+            # View tool shortcuts
             "tool_hand": "H",
             "tool_zoom": "Z",
-            "tool_crop": "C",
-            "tool_brush": "B",
-            "tool_eyedropper": "I",
 
-            # Crop helpers
-            "start_crop": "C",
-            "clear_crop": "Shift+C",
-            "clear_paint": "Ctrl+Alt+Delete",
+            # No other edit features except rotate
         }
 
     def _load_settings(self) -> UISettings:
@@ -1313,15 +1108,8 @@ class ImageManagementUI:
             ("export_selected", "Export Selected"),
             ("settings", "Settings (Tab)"),
             ("settings_alt", "Settings (Ctrl+,)"),
-            ("undo", "Undo"),
-            ("redo", "Redo"),
-            ("redo_alt", "Redo (Alt)"),
-            ("history_panel", "History panel"),
             ("tool_hand", "Tool: Hand"),
             ("tool_zoom", "Tool: Zoom"),
-            ("tool_crop", "Tool: Crop"),
-            ("tool_brush", "Tool: Brush"),
-            ("tool_eyedropper", "Tool: Eyedropper"),
             ("select_wizard", "Select Wizard"),
             ("select_all", "Select All"),
             ("select_none", "Select None (Deselect)"),
@@ -1337,11 +1125,8 @@ class ImageManagementUI:
             ("rotate_left", "Rotate -90"),
             ("rotate_right", "Rotate +90"),
             ("rotate_180", "Rotate 180"),
-            ("reset_ops", "Reset operations"),
             ("delete_selected", "Delete selected"),
-            ("start_crop", "Start crop"),
-            ("clear_crop", "Clear crop"),
-            ("clear_paint", "Clear paint"),
+            # (editing removed except rotate)
         ]
 
         grid = ttk.Frame(shortcuts)
@@ -1724,10 +1509,6 @@ class ImageManagementUI:
         if current_img is None:
             return
         display_img = current_img
-        if self.show_table_mask_var.get() and editor.table_mask is not None:
-            display_img = self._composite_table_mask(display_img, editor.table_mask)
-        if self.show_table_cells_var.get() and editor.table_cells_mask is not None:
-            display_img = self._composite_cells_mask(display_img, editor.table_cells_mask)
 
         # Preserve view: if we're refreshing the same page (e.g. brush stroke), don't reset.
         same_page = (self._viewer_current_index == self.current_index)
@@ -1743,7 +1524,6 @@ class ImageManagementUI:
             self.viewer.set_image(display_img, reset_view=False)
 
         self._viewer_current_index = self.current_index
-        self._refresh_history_panel()
         
         # Update page label
         self.page_label.config(text=f"{self.current_index + 1} / {len(self.processed_images)}")
@@ -1761,11 +1541,7 @@ class ImageManagementUI:
         self.metadata_text.delete(1.0, tk.END)
         self.metadata_text.insert(1.0, meta_text)
         
-        # Update sliders
-        self.brightness_var.set(editor.brightness)
-        self.contrast_var.set(editor.contrast)
-        self._update_brightness_label()
-        self._update_contrast_label()
+        # No brightness/contrast sliders (editing removed except rotate)
 
     def _refresh_view(self):
         """Refresh current viewer without changing selection."""
@@ -1779,37 +1555,7 @@ class ImageManagementUI:
             return
         self._view_state_by_index[self._viewer_current_index] = self.viewer.get_view_state()
 
-    def _composite_table_mask(self, base_img: Image.Image, mask_l: Image.Image) -> Image.Image:
-        """
-        Overlay the line mask in semi-transparent red.
-        mask_l is expected to be 'L' 0..255 same size as base.
-        """
-        if mask_l.mode != "L":
-            mask_l = mask_l.convert("L")
-        if mask_l.size != base_img.size:
-            # Can't overlay safely
-            return base_img
-        base_rgba = base_img.convert("RGBA")
-        # Create a red overlay where mask is present
-        overlay = Image.new("RGBA", base_img.size, (255, 0, 0, 0))
-        # Alpha = mask * 0.55
-        alpha = mask_l.point(lambda p: int(p * 0.55))
-        overlay.putalpha(alpha)
-        return Image.alpha_composite(base_rgba, overlay).convert("RGB")
-
-    def _composite_cells_mask(self, base_img: Image.Image, mask_l: Image.Image) -> Image.Image:
-        """
-        Overlay the cells mask in semi-transparent green.
-        """
-        if mask_l.mode != "L":
-            mask_l = mask_l.convert("L")
-        if mask_l.size != base_img.size:
-            return base_img
-        base_rgba = base_img.convert("RGBA")
-        overlay = Image.new("RGBA", base_img.size, (0, 255, 0, 0))
-        alpha = mask_l.point(lambda p: int(p * 0.35))
-        overlay.putalpha(alpha)
-        return Image.alpha_composite(base_rgba, overlay).convert("RGB")
+    # (Mask overlay helpers removed)
     
     def _rotate(self, angle: float):
         """Rotate current image."""
@@ -1847,8 +1593,8 @@ class ImageManagementUI:
         self._update_brightness_label()
     
     def _update_brightness_label(self):
-        """Update brightness label."""
-        self.brightness_label.config(text=f"{self.brightness_var.get():.2f}")
+        # Kept for backward compatibility if referenced elsewhere; no-op.
+        return
     
     def _on_contrast_change(self, value):
         """Handle contrast slider change."""
@@ -1869,27 +1615,13 @@ class ImageManagementUI:
         self._update_contrast_label()
     
     def _update_contrast_label(self):
-        """Update contrast label."""
-        self.contrast_label.config(text=f"{self.contrast_var.get():.2f}")
+        # Kept for backward compatibility if referenced elsewhere; no-op.
+        return
     
     def _reset_operations(self):
         """Reset all operations on current image."""
-        targets = self._get_selected_indices_or_current()
-        if not targets:
-            return
-
-        for idx in targets:
-            if idx in self.image_editors:
-                self.image_editors[idx].reset()
-            else:
-                # If no editor exists yet, nothing to reset.
-                pass
-
-        self.brightness_var.set(1.0)
-        self.contrast_var.set(1.0)
-        self._display_current_image()
-        self._update_brightness_label()
-        self._update_contrast_label()
+        # Editing removed except rotate; keep as no-op.
+        return
     
     def _start_crop(self):
         """Start crop selection mode."""
@@ -2145,10 +1877,6 @@ class ImageManagementUI:
         bind("export_selected", keymap.get("export_selected", ""), self._export_selected)
         bind("settings", keymap.get("settings", ""), self._open_settings_window)
         bind("settings_alt", keymap.get("settings_alt", ""), self._open_settings_window)
-        bind("undo", keymap.get("undo", ""), self._undo_selected)
-        bind("redo", keymap.get("redo", ""), self._redo_selected)
-        bind("redo_alt", keymap.get("redo_alt", ""), self._redo_selected)
-        bind("history_panel", keymap.get("history_panel", ""), self._open_history_window)
 
         bind("select_all", keymap.get("select_all", ""), self._select_all)
         bind("select_none", keymap.get("select_none", ""), self._select_none)
@@ -2171,17 +1899,10 @@ class ImageManagementUI:
         bind("reset_ops", keymap.get("reset_ops", ""), self._reset_operations)
 
         bind("delete_selected", keymap.get("delete_selected", ""), self._delete_selected)
-        # Tool selection
+        # Tool selection (view-only)
         bind("tool_hand", keymap.get("tool_hand", ""), lambda: self._set_tool("hand"))
         bind("tool_zoom", keymap.get("tool_zoom", ""), lambda: self._set_tool("zoom"))
-        bind("tool_crop", keymap.get("tool_crop", ""), lambda: self._set_tool("crop"))
-        bind("tool_brush", keymap.get("tool_brush", ""), lambda: self._set_tool("brush"))
-        bind("tool_eyedropper", keymap.get("tool_eyedropper", ""), lambda: self._set_tool("eyedropper"))
-
-        # Legacy crop shortcut (kept for compatibility)
-        bind("start_crop", keymap.get("start_crop", ""), lambda: self._set_tool("crop"))
-        bind("clear_crop", keymap.get("clear_crop", ""), self._clear_crop)
-        bind("clear_paint", keymap.get("clear_paint", ""), self._clear_paint_selected)
+        # No other edit features except rotate
 
     def _set_tool(self, tool: str):
         if hasattr(self, "active_tool"):
