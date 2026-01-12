@@ -543,6 +543,8 @@ class ImageManagementUI:
         self._view_state_by_index: Dict[int, tuple[float, int, int]] = {}
         self._viewer_current_index: Optional[int] = None
         self._pending_view_refresh_after_id: Optional[str] = None
+        self._file_menu: Optional[tk.Menu] = None
+        self._file_menu_ocr_index: Optional[int] = None
         
         # Create UI
         self._create_ui()
@@ -764,6 +766,12 @@ class ImageManagementUI:
             return
 
         if tool == "cell_select":
+            if not self._current_page_has_table():
+                messagebox.showwarning("OCR", "Run Edit → Detect table first, then use Cell Select (OCR).")
+                self.active_tool.set("hand")
+                self._apply_active_tool()
+                return
+
             self.canvas.config(cursor="tcross")
             self._set_ocr_panel_visible(True)
 
@@ -794,6 +802,8 @@ class ImageManagementUI:
 
     def _show_ocr_context_menu(self, x_root: int, y_root: int):
         """Context menu for OCR actions (only meaningful in Cell Select mode)."""
+        if not self._current_page_has_table():
+            return
         menu = tk.Menu(self.root, tearoff=0)
         menu.add_command(label="Detect text (to box)", command=self._ocr_to_textbox)
         menu.add_command(label="Export OCR result…", command=self._ocr_selected_cells)
@@ -801,6 +811,25 @@ class ImageManagementUI:
             menu.tk_popup(x_root, y_root)
         finally:
             menu.grab_release()
+
+    def _current_page_has_table(self) -> bool:
+        """True when current page has both table line and cell masks computed."""
+        if self.current_index < 0 or self.current_index >= len(self.processed_images):
+            return False
+        editor = self.image_editors.get(self.current_index)
+        if editor is None:
+            return False
+        return (editor.table_mask is not None) and (editor.table_cells_mask is not None)
+
+    def _update_ocr_enabled_state(self):
+        """Enable OCR menu item only after Detect table has been run on the current page."""
+        if self._file_menu is None or self._file_menu_ocr_index is None:
+            return
+        state = tk.NORMAL if self._current_page_has_table() else tk.DISABLED
+        try:
+            self._file_menu.entryconfig(self._file_menu_ocr_index, state=state)
+        except Exception:
+            pass
 
     # ----------------------------
     # Toolbar / Menus
@@ -817,6 +846,8 @@ class ImageManagementUI:
         file_menu.add_command(label="Export All…", command=self._export_all)
         file_menu.add_separator()
         file_menu.add_command(label="OCR selected cells…", command=self._ocr_selected_cells)
+        self._file_menu = file_menu
+        self._file_menu_ocr_index = file_menu.index("end")
         file_menu.add_command(label="Settings…", command=self._open_settings_window)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.destroy)
@@ -1834,6 +1865,7 @@ class ImageManagementUI:
             self.viewer.set_image(display_img, reset_view=False)
 
         self._viewer_current_index = self.current_index
+        self._update_ocr_enabled_state()
         
         # Update page label
         self.page_label.config(text=f"{self.current_index + 1} / {len(self.processed_images)}")
