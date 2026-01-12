@@ -1026,7 +1026,12 @@ class ImageManagementUI:
         Not supported (will fall back to ","):
         - newline delimiters like "\\n", "\\r", "enter" (CSV uses newline for rows)
         """
-        s = ("" if raw is None else str(raw)).strip()
+        s_raw = "" if raw is None else str(raw)
+        # Preserve literal whitespace delimiters (tabs/spaces) if already a single char.
+        if s_raw in ("\t", " "):
+            return s_raw
+
+        s = s_raw.strip()
         if not s:
             return ","
 
@@ -1969,7 +1974,7 @@ class ImageManagementUI:
             self.settings.confirm_delete = bool(confirm_del_var.get())
             self.settings.history_max_steps = max(5, int(history_max_var.get()))
             self.settings.ocr_lang = (ocr_lang_var.get() or "eng").strip()
-            raw_delim = (csv_delim_var.get() or ",").strip()
+            raw_delim = (csv_delim_var.get() or ",")
             delim = self._parse_csv_delimiter(raw_delim)
             if delim == "," and raw_delim and raw_delim.strip() not in (",", "comma"):
                 # Likely invalid (e.g. "enter"/"\\n"/multi-char). Warn once.
@@ -1980,7 +1985,14 @@ class ImageManagementUI:
                     "Note: Enter/newline cannot be used as a CSV delimiter.\n\n"
                     "Using ','.",
                 )
-            self.settings.csv_delimiter = delim
+            # Store a stable, human-editable representation in JSON.
+            # (If we store a literal tab, it can be stripped by some editors/parsers.)
+            if delim == "\t":
+                self.settings.csv_delimiter = "\\t"
+            elif delim == " ":
+                self.settings.csv_delimiter = "space"
+            else:
+                self.settings.csv_delimiter = delim
             self.settings.csv_insert_prefix_quote = bool(csv_prefix_quote_var.get())
             self.settings.m1_apply_grayscale = bool(m1_gray_var.get())
             self.settings.m1_apply_denoise = bool(m1_denoise_var.get())
