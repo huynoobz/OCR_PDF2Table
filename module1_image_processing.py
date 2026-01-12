@@ -51,6 +51,8 @@ class PDFImageProcessor:
         apply_deskew: bool = True,
         apply_contrast: bool = True,
         contrast_factor: float = 1.2,
+        apply_ocr_enhance: bool = False,
+        ocr_enhance_mode: str = "adaptive_binary",
         crop_boxes: Optional[Dict[int, Tuple[int, int, int, int]]] = None
     ) -> List[ProcessedImage]:
         """
@@ -113,6 +115,11 @@ class PDFImageProcessor:
             if apply_contrast:
                 img_array = self._apply_contrast(img_array, contrast_factor)
                 operations.append(f"contrast({contrast_factor})")
+
+            # OCR-focused enhancement (optional)
+            if apply_ocr_enhance:
+                img_array = self._enhance_for_ocr(img_array, mode=ocr_enhance_mode)
+                operations.append(f"ocr_enhance({ocr_enhance_mode})")
             
             # Apply crop if specified
             crop_box = crop_boxes.get(page_num)
@@ -258,6 +265,60 @@ class PDFImageProcessor:
         """Crop the image to the specified box."""
         left, top, right, bottom = crop_box
         return img_array[top:bottom, left:right]
+
+    def _enhance_for_ocr(self, img_array: np.ndarray, mode: str = "adaptive_binary") -> np.ndarray:
+        """
+        Extra quality step to make text more obvious for OCR.
+
+        Pipeline:
+        - Ensure grayscale
+        - CLAHE (local contrast)
+        - Unsharp mask (sharpen)
+        - Optional adaptive threshold (invert OFF; we keep black text on white background)
+        - Light morphology cleanup (open/close)
+
+        Args:
+            img_array: input image (gray or color)
+            mode:
+                - "adaptive_binary": returns a clean binary image (uint8 0/255)
+                - "gray": returns enhanced grayscale
+        """
+        if img_array.ndim == 3:
+            gray = self._apply_grayscale(img_array)
+        else:
+            gray = img_array.copy()
+
+        if gray.dtype != np.uint8:
+            gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+        # CLAHE for local contrast
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray = clahe.apply(gray)
+
+        # Unsharp mask (sharpen)
+        blur = cv2.GaussianBlur(gray, (0, 0), sigmaX=1.0)
+        sharp = cv2.addWeighted(gray, 1.5, blur, -0.5, 0)
+
+        if mode == "gray":
+            return sharp
+
+        # Adaptive threshold (black text on white background)
+        block_size = 31  # must be odd
+        c = 10
+        binary = cv2.adaptiveThreshold(
+            sharp,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            block_size,
+            c,
+        )
+
+        # Morphology to remove small noise and close small gaps in strokes
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, k, iterations=1)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, k, iterations=1)
+        return binary
     
     def process_single_image(
         self,
@@ -268,6 +329,8 @@ class PDFImageProcessor:
         apply_deskew: bool = True,
         apply_contrast: bool = True,
         contrast_factor: float = 1.2,
+        apply_ocr_enhance: bool = False,
+        ocr_enhance_mode: str = "adaptive_binary",
         rotation: float = 0.0,
         crop_box: Optional[Tuple[int, int, int, int]] = None
     ) -> ProcessedImage:
@@ -300,6 +363,10 @@ class PDFImageProcessor:
         if apply_contrast:
             img_array = self._apply_contrast(img_array, contrast_factor)
             operations.append(f"contrast({contrast_factor})")
+
+        if apply_ocr_enhance:
+            img_array = self._enhance_for_ocr(img_array, mode=ocr_enhance_mode)
+            operations.append(f"ocr_enhance({ocr_enhance_mode})")
         
         if crop_box:
             img_array = self._apply_crop(img_array, crop_box)
