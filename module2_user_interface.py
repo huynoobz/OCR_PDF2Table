@@ -40,6 +40,13 @@ class ImageViewer:
         self.offset_y = 0
         self.canvas_width = 0
         self.canvas_height = 0
+
+        # Rendering cache / state
+        self._img_item_id: Optional[int] = None
+        self._cached_key: Optional[tuple] = None  # (image_id, w, h, resample)
+        self._cached_photo: Optional[ImageTk.PhotoImage] = None
+        self._pending_redraw_after_id: Optional[str] = None
+        self._image_version: int = 0
         
         # Bind mouse events (only if not in crop mode)
         # Note: Crop mode will rebind these events
@@ -48,6 +55,7 @@ class ImageViewer:
         self.canvas.update_idletasks()
         self.canvas_width = self.canvas.winfo_width()
         self.canvas_height = self.canvas.winfo_height()
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
     
     def _bind_viewer_events(self):
         """Bind viewer mouse events."""
@@ -60,11 +68,12 @@ class ImageViewer:
     def set_image(self, pil_image: Image.Image, *, reset_view: bool = True):
         """Set the image to display."""
         self.image = pil_image.copy()
+        self._image_version += 1
         if reset_view:
             self.scale = 1.0
             self.offset_x = 0
             self.offset_y = 0
-        self._update_display()
+        self._schedule_redraw(force=True)
 
     def get_view_state(self) -> tuple[float, int, int]:
         """Return (scale, offset_x, offset_y)."""
@@ -75,10 +84,29 @@ class ImageViewer:
         self.scale = float(scale)
         self.offset_x = int(offset_x)
         self.offset_y = int(offset_y)
-        self._update_display()
+        self._schedule_redraw(force=True)
     
-    def _update_display(self):
-        """Update the canvas display."""
+    def _on_canvas_configure(self, _event=None):
+        # Debounce redraw on resize
+        self._schedule_redraw(force=True)
+
+    def _schedule_redraw(self, *, force: bool = False, delay_ms: int = 25):
+        """Debounce expensive redraws (resize + PhotoImage creation)."""
+        if self.image is None:
+            return
+        if self._pending_redraw_after_id is not None:
+            try:
+                self.canvas.after_cancel(self._pending_redraw_after_id)
+            except Exception:
+                pass
+            self._pending_redraw_after_id = None
+        if force:
+            self._pending_redraw_after_id = self.canvas.after(delay_ms, lambda: self._update_display(force_render=True))
+        else:
+            self._pending_redraw_after_id = self.canvas.after(delay_ms, lambda: self._update_display(force_render=False))
+
+    def _update_display(self, *, force_render: bool):
+        """Update the canvas display. If force_render is False, only reposition if possible."""
         if self.image is None:
             return
         
@@ -94,19 +122,36 @@ class ImageViewer:
         img_width, img_height = self.image.size
         display_width = int(img_width * self.scale)
         display_height = int(img_height * self.scale)
-        
-        # Resize image
-        resized = self.image.resize((display_width, display_height), Image.Resampling.LANCZOS)
-        self.image_tk = ImageTk.PhotoImage(resized)
-        
-        # Clear and redraw
-        self.canvas.delete("all")
-        
+
         # Calculate position
         x = self.canvas_width // 2 + self.offset_x
         y = self.canvas_height // 2 + self.offset_y
-        
-        self.canvas.create_image(x, y, image=self.image_tk, anchor=tk.CENTER)
+
+        # Fast path: if we already have an image item and aren't forcing render, only move it
+        if (not force_render) and self._img_item_id is not None:
+            try:
+                self.canvas.coords(self._img_item_id, x, y)
+                return
+            except Exception:
+                # Fall back to full render if the item was deleted
+                self._img_item_id = None
+
+        # Render (cache resized PhotoImage per image+scale)
+        key = (self._image_version, display_width, display_height, "LANCZOS")
+        if self._cached_key != key:
+            if display_width < 1 or display_height < 1:
+                return
+            resized = self.image.resize((display_width, display_height), Image.Resampling.LANCZOS)
+            self._cached_photo = ImageTk.PhotoImage(resized)
+            self._cached_key = key
+
+        self.image_tk = self._cached_photo
+
+        if self._img_item_id is None:
+            self._img_item_id = self.canvas.create_image(x, y, image=self.image_tk, anchor=tk.CENTER, tags=("img",))
+        else:
+            self.canvas.itemconfig(self._img_item_id, image=self.image_tk)
+            self.canvas.coords(self._img_item_id, x, y)
     
     def on_click(self, event):
         """Handle mouse click for panning."""
@@ -122,7 +167,8 @@ class ImageViewer:
             self.offset_y += dy
             self.last_pan_x = event.x
             self.last_pan_y = event.y
-            self._update_display()
+            # Pan should be fast: just reposition the already-rendered image item
+            self._update_display(force_render=False)
     
     def on_wheel(self, event):
         """Handle mouse wheel for zooming."""
@@ -136,21 +182,21 @@ class ImageViewer:
         self.scale *= factor
         if self.scale > 5.0:
             self.scale = 5.0
-        self._update_display()
+        self._schedule_redraw(force=True)
     
     def zoom_out(self, factor=1.2):
         """Zoom out."""
         self.scale /= factor
         if self.scale < 0.1:
             self.scale = 0.1
-        self._update_display()
+        self._schedule_redraw(force=True)
     
     def reset_view(self):
         """Reset zoom and pan."""
         self.scale = 1.0
         self.offset_x = 0
         self.offset_y = 0
-        self._update_display()
+        self._schedule_redraw(force=True)
     
     def fit_to_window(self):
         """Fit image to window."""
@@ -171,7 +217,7 @@ class ImageViewer:
         
         self.offset_x = 0
         self.offset_y = 0
-        self._update_display()
+        self._schedule_redraw(force=True)
 
 
 class ImageEditor:
@@ -478,6 +524,7 @@ class ImageManagementUI:
         # History panel
         self._history_window: Optional[tk.Toplevel] = None
         self._history_listbox: Optional[tk.Listbox] = None
+        self._pending_view_refresh_after_id: Optional[str] = None
         
         # Create UI
         self._create_ui()
@@ -907,7 +954,20 @@ class ImageManagementUI:
             self._apply_brush_settings_to_editor(editor)
             editor.paint_line(p1, p2)
 
-        self._display_current_image()
+        # During brush strokes, throttle view refresh to avoid heavy redraw per mouse-move
+        if getattr(self, "_brush_batch_targets", None):
+            self._schedule_view_refresh()
+        else:
+            self._display_current_image()
+
+    def _schedule_view_refresh(self, delay_ms: int = 33):
+        if self._pending_view_refresh_after_id is not None:
+            try:
+                self.root.after_cancel(self._pending_view_refresh_after_id)
+            except Exception:
+                pass
+            self._pending_view_refresh_after_id = None
+        self._pending_view_refresh_after_id = self.root.after(delay_ms, self._display_current_image)
 
     def _eyedropper_pick(self, canvas_x: float, canvas_y: float):
         p = self._canvas_to_image_xy(canvas_x, canvas_y)
