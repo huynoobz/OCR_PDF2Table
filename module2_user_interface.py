@@ -15,6 +15,7 @@ from dataclasses import dataclass, asdict
 from PIL import ImageDraw
 import numpy as np
 from module1_image_processing import ProcessedImage, PDFImageProcessor
+from module3_OCR import OCRConfig, ocr_image_pil
 import cv2
 
 
@@ -1669,7 +1670,7 @@ class ImageManagementUI:
             l, t, r, b = editor.table_cell_boxes[idx]
             crop = base.crop((l, t, r, b))
             try:
-                text = PDFImageProcessor.ocr_image_pil(crop, lang=lang, psm=6)
+                text = ocr_image_pil(crop, config=OCRConfig(lang=lang, psm=6))
             except Exception as e:
                 messagebox.showerror("OCR", f"OCR failed: {e}\n\nMake sure Tesseract OCR is installed and on PATH.")
                 return
