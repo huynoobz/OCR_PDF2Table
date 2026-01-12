@@ -204,18 +204,40 @@ class PDFImageProcessor:
         # If angle is very small, don't rotate
         if abs(angle) < 0.5:
             return img_array, 0.0
-        
-        # Rotate the image
-        (h, w) = img_array.shape[:2]
-        center = (w // 2, h // 2)
-        M = cv2.getRotationMatrix2D(center, angle, 1.0)
-        
-        if len(img_array.shape) == 3:
-            rotated = cv2.warpAffine(img_array, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-        else:
-            rotated = cv2.warpAffine(img_array, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-        
+
+        # Rotate without cropping (expand canvas to fit the rotated result)
+        rotated = self._rotate_bound(img_array, angle)
         return rotated, angle
+
+    def _rotate_bound(self, img_array: np.ndarray, angle_degrees: float) -> np.ndarray:
+        """
+        Rotate an image by angle_degrees and expand the output image to avoid cropping.
+
+        This fixes the common OpenCV behavior where warpAffine((w,h)) clips corners.
+        """
+        (h, w) = img_array.shape[:2]
+        center = (w / 2.0, h / 2.0)
+
+        M = cv2.getRotationMatrix2D(center, angle_degrees, 1.0)
+        cos = abs(M[0, 0])
+        sin = abs(M[0, 1])
+
+        # compute the new bounding dimensions of the image
+        new_w = int((h * sin) + (w * cos))
+        new_h = int((h * cos) + (w * sin))
+
+        # adjust the rotation matrix to take into account translation
+        M[0, 2] += (new_w / 2.0) - center[0]
+        M[1, 2] += (new_h / 2.0) - center[1]
+
+        rotated = cv2.warpAffine(
+            img_array,
+            M,
+            (new_w, new_h),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
+        return rotated
     
     def _apply_contrast(self, img_array: np.ndarray, factor: float) -> np.ndarray:
         """Enhance contrast of the image."""
