@@ -556,6 +556,20 @@ class ImageManagementUI:
 
     def _bind_space_hand(self):
         """Hold Space to temporarily switch to Hand tool (Photoshop-like)."""
+        # Prevent focused ttk widgets (especially tool radiobuttons) from treating Space as "activate",
+        # which can switch tools back while Space is still held.
+        def swallow_space(event):
+            if self._should_ignore_shortcut(event):
+                return None
+            return "break"
+
+        for cls in ("TRadiobutton", "TButton", "TMenubutton"):
+            try:
+                self.root.bind_class(cls, "<KeyPress-space>", swallow_space, add="+")
+                self.root.bind_class(cls, "<KeyRelease-space>", swallow_space, add="+")
+            except Exception:
+                pass
+
         def on_press(event):
             if self._should_ignore_shortcut(event):
                 return
@@ -589,8 +603,6 @@ class ImageManagementUI:
         # bind_all so it works regardless of focus (except when typing)
         self.root.bind_all("<KeyPress-space>", on_press)
         self.root.bind_all("<KeyRelease-space>", on_release)
-        # If the window loses focus while Space is held, cleanly restore state
-        self.root.bind("<FocusOut>", lambda _e: on_release(_e))
     
     def _create_ui(self):
         """Create the user interface."""
