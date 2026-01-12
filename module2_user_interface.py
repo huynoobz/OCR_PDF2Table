@@ -560,32 +560,37 @@ class ImageManagementUI:
             if self._should_ignore_shortcut(event):
                 return
             if self._space_hand_active:
-                return
+                return "break"
             # Only activate if we're not already hand
             if not hasattr(self, "active_tool"):
-                return
+                return "break"
             current = self.active_tool.get()
             if current == "hand":
-                return
+                return "break"
             self._space_prev_tool = current
             self._space_hand_active = True
             self.active_tool.set("hand")
             self._apply_active_tool()
+            # Prevent focused widgets (e.g., radiobuttons) from handling Space and switching tools back
+            return "break"
 
         def on_release(event):
             if self._should_ignore_shortcut(event):
                 return
             if not self._space_hand_active:
-                return
+                return "break"
             self._space_hand_active = False
             if self._space_prev_tool and hasattr(self, "active_tool"):
                 self.active_tool.set(self._space_prev_tool)
                 self._space_prev_tool = None
                 self._apply_active_tool()
+            return "break"
 
         # bind_all so it works regardless of focus (except when typing)
         self.root.bind_all("<KeyPress-space>", on_press)
         self.root.bind_all("<KeyRelease-space>", on_release)
+        # If the window loses focus while Space is held, cleanly restore state
+        self.root.bind("<FocusOut>", lambda _e: on_release(_e))
     
     def _create_ui(self):
         """Create the user interface."""
@@ -2314,6 +2319,10 @@ class ImageManagementUI:
 
     def _set_tool(self, tool: str):
         if hasattr(self, "active_tool"):
+            # If Space-hand override is active, remember the intended tool but keep Hand until release.
+            if getattr(self, "_space_hand_active", False):
+                self._space_prev_tool = tool
+                return
             self.active_tool.set(tool)
             self._apply_active_tool()
 
