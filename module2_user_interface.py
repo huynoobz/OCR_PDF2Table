@@ -23,6 +23,7 @@ class UISettings:
     auto_fit_on_load: bool = True
     show_toolbar_hint: bool = True
     confirm_delete: bool = True
+    history_max_steps: int = 50
     # Friendly key strings (e.g. "Ctrl+O", "Tab") -> converted to Tk sequences at bind time
     keymap: Optional[Dict[str, str]] = None
 
@@ -192,6 +193,15 @@ class ImageEditor:
 
         # Table detection mask (binary mask as PIL 'L', 0/255), aligned to _base_image
         self.table_mask: Optional[Image.Image] = None
+
+        # History (Photoshop-like): list of snapshots + pointer
+        self._history: List[dict] = []
+        self._history_labels: List[str] = []
+        self._history_idx: int = -1
+        self._history_max_steps: int = 50
+        self._suspend_history: bool = False
+        self._batch_depth: int = 0
+        self._batch_label: Optional[str] = None
     
     def set_image(self, pil_image: Image.Image):
         """Set the base image."""
@@ -204,6 +214,8 @@ class ImageEditor:
         self.crop_box = None
         self.paint_layer = None
         self.table_mask = None
+        self._reset_history()
+        self._push_history("Open")
     
     def rotate(self, angle: float):
         """Rotate image (non-destructive)."""
@@ -211,21 +223,25 @@ class ImageEditor:
             return
         self.rotation += angle
         self._apply_all_operations()
+        self._push_history(f"Rotate {angle:+g}°")
     
     def set_brightness(self, factor: float):
         """Set brightness factor (1.0 = no change)."""
         self.brightness = factor
         self._apply_all_operations()
+        self._push_history("Brightness")
     
     def set_contrast(self, factor: float):
         """Set contrast factor (1.0 = no change)."""
         self.contrast = factor
         self._apply_all_operations()
+        self._push_history("Contrast")
     
     def set_crop(self, crop_box: Optional[tuple]):
         """Set crop box (left, top, right, bottom)."""
         self.crop_box = crop_box
         self._apply_all_operations()
+        self._push_history("Crop" if crop_box else "Crop cleared")
     
     def _apply_all_operations(self):
         """Apply all operations to create current image."""
@@ -291,15 +307,136 @@ class ImageEditor:
         draw.line([p1, p2], fill=rgba, width=int(self.brush_size))
         # Refresh current image composition
         self._apply_all_operations()
+        # History for brush strokes should be batched from UI; don't push per segment.
 
     def clear_paint(self):
         """Clear painted strokes."""
         self.paint_layer = None
         self._apply_all_operations()
+        self._push_history("Clear paint")
 
     def set_table_mask(self, mask: Optional[Image.Image]):
         """Set/clear the table mask (expects 'L' image 0/255, same size as base)."""
         self.table_mask = mask
+        self._push_history("Table mask" if mask is not None else "Table mask cleared")
+
+    def reset(self):
+        """Reset all operations."""
+        if self.original_image:
+            self.set_image(self.original_image)
+            self._push_history("Reset")
+
+    # ----------------------------
+    # History API
+    # ----------------------------
+    def set_history_max_steps(self, n: int):
+        self._history_max_steps = max(5, int(n))
+        self._trim_history()
+
+    def history_labels(self) -> List[str]:
+        return list(self._history_labels)
+
+    def history_index(self) -> int:
+        return int(self._history_idx)
+
+    def can_undo(self) -> bool:
+        return self._history_idx > 0
+
+    def can_redo(self) -> bool:
+        return self._history_idx < (len(self._history) - 1)
+
+    def undo(self):
+        if not self.can_undo():
+            return
+        self._history_idx -= 1
+        self._restore_history(self._history[self._history_idx])
+
+    def redo(self):
+        if not self.can_redo():
+            return
+        self._history_idx += 1
+        self._restore_history(self._history[self._history_idx])
+
+    def jump_to(self, idx: int):
+        idx = int(idx)
+        if idx < 0 or idx >= len(self._history):
+            return
+        self._history_idx = idx
+        self._restore_history(self._history[self._history_idx])
+
+    def begin_batch(self, label: str):
+        """Batch multiple changes into one history step (e.g., a brush stroke)."""
+        self._batch_depth += 1
+        if self._batch_depth == 1:
+            self._batch_label = label
+            # Capture pre-state so undo restores before the stroke
+            self._push_history(f"{label} (start)")
+
+    def end_batch(self):
+        if self._batch_depth <= 0:
+            return
+        self._batch_depth -= 1
+        if self._batch_depth == 0:
+            label = self._batch_label or "Batch"
+            self._batch_label = None
+            self._push_history(label)
+
+    def _reset_history(self):
+        self._history = []
+        self._history_labels = []
+        self._history_idx = -1
+
+    def _snapshot(self) -> dict:
+        return {
+            "rotation": float(self.rotation),
+            "brightness": float(self.brightness),
+            "contrast": float(self.contrast),
+            "crop_box": None if self.crop_box is None else tuple(self.crop_box),
+            "paint_layer": None if self.paint_layer is None else self.paint_layer.copy(),
+            "table_mask": None if self.table_mask is None else self.table_mask.copy(),
+        }
+
+    def _restore_history(self, snap: dict):
+        # Avoid recording while restoring
+        self._suspend_history = True
+        try:
+            self.rotation = float(snap.get("rotation", 0.0))
+            self.brightness = float(snap.get("brightness", 1.0))
+            self.contrast = float(snap.get("contrast", 1.0))
+            self.crop_box = snap.get("crop_box", None)
+            self.paint_layer = snap.get("paint_layer", None)
+            self.table_mask = snap.get("table_mask", None)
+            self._apply_all_operations()
+        finally:
+            self._suspend_history = False
+
+    def _push_history(self, label: str):
+        if self._suspend_history:
+            return
+        # While batching, ignore intermediate pushes (except the explicit start/end calls).
+        if self._batch_depth > 0 and not (label.endswith("(start)") or label == (self._batch_label or "")):
+            return
+
+        snap = self._snapshot()
+
+        # If we are not at the end, drop redo states
+        if self._history_idx < len(self._history) - 1:
+            self._history = self._history[: self._history_idx + 1]
+            self._history_labels = self._history_labels[: self._history_idx + 1]
+
+        self._history.append(snap)
+        self._history_labels.append(label)
+        self._history_idx = len(self._history) - 1
+        self._trim_history()
+
+    def _trim_history(self):
+        max_steps = max(5, int(self._history_max_steps))
+        if len(self._history) <= max_steps:
+            return
+        overflow = len(self._history) - max_steps
+        self._history = self._history[overflow:]
+        self._history_labels = self._history_labels[overflow:]
+        self._history_idx = max(0, self._history_idx - overflow)
     
     def get_current_image(self) -> Optional[Image.Image]:
         """Get the current edited image."""
@@ -337,6 +474,10 @@ class ImageManagementUI:
         # Preserve per-page view (zoom/pan) so switching pages doesn't reset.
         self._view_state_by_index: Dict[int, tuple[float, int, int]] = {}
         self._viewer_current_index: Optional[int] = None
+
+        # History panel
+        self._history_window: Optional[tk.Toplevel] = None
+        self._history_listbox: Optional[tk.Listbox] = None
         
         # Create UI
         self._create_ui()
@@ -608,8 +749,15 @@ class ImageManagementUI:
         if tool == "brush":
             self.canvas.config(cursor="pencil")
             self._brush_last_pt = None
+            self._brush_batch_targets = None
 
             def start(event):
+                targets = self._get_selected_indices_or_current()
+                self._brush_batch_targets = targets
+                # Begin history batch per target so one stroke = one undo step
+                for idx in targets:
+                    editor = self._ensure_editor(idx)
+                    editor.begin_batch("Brush")
                 self._brush_last_pt = self._canvas_to_image_xy(event.x, event.y)
 
             def move(event):
@@ -622,6 +770,11 @@ class ImageManagementUI:
                 self._brush_last_pt = p2
 
             def end(_event):
+                if self._brush_batch_targets:
+                    for idx in self._brush_batch_targets:
+                        if idx in self.image_editors:
+                            self.image_editors[idx].end_batch()
+                self._brush_batch_targets = None
                 self._brush_last_pt = None
 
             self.canvas.bind("<Button-1>", start)
@@ -654,6 +807,10 @@ class ImageManagementUI:
         # Edit menu
         edit_btn = ttk.Menubutton(parent, text="Edit")
         edit_menu = tk.Menu(edit_btn, tearoff=0)
+        edit_menu.add_command(label="Undo", command=self._undo_selected)
+        edit_menu.add_command(label="Redo", command=self._redo_selected)
+        edit_menu.add_command(label="History…", command=self._open_history_window)
+        edit_menu.add_separator()
         edit_menu.add_command(label="Rotate -90°", command=lambda: self._rotate(-90))
         edit_menu.add_command(label="Rotate +90°", command=lambda: self._rotate(90))
         edit_menu.add_command(label="Rotate 180°", command=lambda: self._rotate(180))
@@ -731,6 +888,7 @@ class ImageManagementUI:
             processed = self.processed_images[idx]
             editor = ImageEditor()
             editor.set_image(processed.pil_image)
+            editor.set_history_max_steps(int(getattr(self.settings, "history_max_steps", 50)))
             self.image_editors[idx] = editor
         return self.image_editors[idx]
 
@@ -817,6 +975,85 @@ class ImageManagementUI:
         self._display_current_image()
 
     # ----------------------------
+    # Undo / Redo / History panel
+    # ----------------------------
+    def _undo_selected(self):
+        targets = self._get_selected_indices_or_current()
+        if not targets:
+            return
+        for idx in targets:
+            if idx in self.image_editors:
+                self.image_editors[idx].undo()
+        self._display_current_image()
+        self._refresh_history_panel()
+
+    def _redo_selected(self):
+        targets = self._get_selected_indices_or_current()
+        if not targets:
+            return
+        for idx in targets:
+            if idx in self.image_editors:
+                self.image_editors[idx].redo()
+        self._display_current_image()
+        self._refresh_history_panel()
+
+    def _open_history_window(self):
+        if self._history_window is not None and self._history_window.winfo_exists():
+            self._history_window.lift()
+            self._refresh_history_panel()
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("History")
+        win.transient(self.root)
+        self._history_window = win
+
+        frm = ttk.Frame(win, padding="8")
+        frm.pack(fill=tk.BOTH, expand=True)
+
+        self._history_listbox = tk.Listbox(frm, height=20)
+        self._history_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        sb = ttk.Scrollbar(frm, orient=tk.VERTICAL, command=self._history_listbox.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._history_listbox.config(yscrollcommand=sb.set)
+
+        self._history_listbox.bind("<Double-Button-1>", self._on_history_double_click)
+        self._history_listbox.bind("<Return>", self._on_history_double_click)
+
+        self._refresh_history_panel()
+
+    def _on_history_double_click(self, _event=None):
+        if self._history_listbox is None:
+            return
+        sel = self._history_listbox.curselection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        if self.current_index in self.image_editors:
+            self.image_editors[self.current_index].jump_to(idx)
+            self._display_current_image()
+            self._refresh_history_panel()
+
+    def _refresh_history_panel(self):
+        if self._history_window is None or not self._history_window.winfo_exists():
+            return
+        if self._history_listbox is None:
+            return
+        self._history_listbox.delete(0, tk.END)
+        if self.current_index not in self.image_editors:
+            return
+        editor = self.image_editors[self.current_index]
+        labels = editor.history_labels()
+        for lbl in labels:
+            self._history_listbox.insert(tk.END, lbl)
+        cur = editor.history_index()
+        if 0 <= cur < len(labels):
+            self._history_listbox.selection_clear(0, tk.END)
+            self._history_listbox.selection_set(cur)
+            self._history_listbox.see(cur)
+
+    # ----------------------------
     # Settings / Persistence
     # ----------------------------
     def _default_keymap(self) -> Dict[str, str]:
@@ -829,6 +1066,10 @@ class ImageManagementUI:
             "export_selected": "Ctrl+Shift+E",
             "settings": "Tab",
             "settings_alt": "Ctrl+,",
+            "undo": "Ctrl+Z",
+            "redo": "Ctrl+Y",
+            "redo_alt": "Ctrl+Shift+Z",
+            "history_panel": "F9",
             "select_all": "Ctrl+A",
             "select_none": "Ctrl+D",
             "select_invert": "Ctrl+Shift+I",
@@ -865,6 +1106,7 @@ class ImageManagementUI:
             auto_fit_on_load=True,
             show_toolbar_hint=True,
             confirm_delete=True,
+            history_max_steps=50,
             keymap=self._default_keymap(),
         )
         try:
@@ -879,6 +1121,7 @@ class ImageManagementUI:
                     auto_fit_on_load=bool(data.get("auto_fit_on_load", defaults.auto_fit_on_load)),
                     show_toolbar_hint=bool(data.get("show_toolbar_hint", defaults.show_toolbar_hint)),
                     confirm_delete=bool(data.get("confirm_delete", defaults.confirm_delete)),
+                    history_max_steps=int(data.get("history_max_steps", defaults.history_max_steps)),
                     keymap=keymap,
                 )
         except Exception:
@@ -926,6 +1169,7 @@ class ImageManagementUI:
         auto_fit_var = tk.BooleanVar(value=bool(self.settings.auto_fit_on_load))
         hint_var = tk.BooleanVar(value=bool(self.settings.show_toolbar_hint))
         confirm_del_var = tk.BooleanVar(value=bool(self.settings.confirm_delete))
+        history_max_var = tk.IntVar(value=int(getattr(self.settings, "history_max_steps", 50)))
 
         row = 0
         ttk.Label(general, text="Default DPI (for Open PDF):").grid(row=row, column=0, sticky=tk.W, pady=4)
@@ -947,6 +1191,10 @@ class ImageManagementUI:
         )
         row += 1
 
+        ttk.Label(general, text="History max steps:").grid(row=row, column=0, sticky=tk.W, pady=4)
+        ttk.Entry(general, textvariable=history_max_var, width=10).grid(row=row, column=1, sticky=tk.W, pady=4)
+        row += 1
+
         # Shortcuts tab
         shortcuts = ttk.Frame(nb, padding="10")
         nb.add(shortcuts, text="Shortcuts")
@@ -962,6 +1210,10 @@ class ImageManagementUI:
             ("export_selected", "Export Selected"),
             ("settings", "Settings (Tab)"),
             ("settings_alt", "Settings (Ctrl+,)"),
+            ("undo", "Undo"),
+            ("redo", "Redo"),
+            ("redo_alt", "Redo (Alt)"),
+            ("history_panel", "History panel"),
             ("tool_hand", "Tool: Hand"),
             ("tool_zoom", "Tool: Zoom"),
             ("tool_crop", "Tool: Crop"),
@@ -1004,6 +1256,7 @@ class ImageManagementUI:
             self.settings.auto_fit_on_load = bool(auto_fit_var.get())
             self.settings.show_toolbar_hint = bool(hint_var.get())
             self.settings.confirm_delete = bool(confirm_del_var.get())
+            self.settings.history_max_steps = max(5, int(history_max_var.get()))
 
             # Persist shortcuts
             if self.settings.keymap is None:
@@ -1385,6 +1638,7 @@ class ImageManagementUI:
             self.viewer.set_image(display_img, reset_view=False)
 
         self._viewer_current_index = self.current_index
+        self._refresh_history_panel()
         
         # Update page label
         self.page_label.config(text=f"{self.current_index + 1} / {len(self.processed_images)}")
@@ -1772,6 +2026,10 @@ class ImageManagementUI:
         bind("export_selected", keymap.get("export_selected", ""), self._export_selected)
         bind("settings", keymap.get("settings", ""), self._open_settings_window)
         bind("settings_alt", keymap.get("settings_alt", ""), self._open_settings_window)
+        bind("undo", keymap.get("undo", ""), self._undo_selected)
+        bind("redo", keymap.get("redo", ""), self._redo_selected)
+        bind("redo_alt", keymap.get("redo_alt", ""), self._redo_selected)
+        bind("history_panel", keymap.get("history_panel", ""), self._open_history_window)
 
         bind("select_all", keymap.get("select_all", ""), self._select_all)
         bind("select_none", keymap.get("select_none", ""), self._select_none)
