@@ -27,6 +27,14 @@ class UISettings:
     confirm_delete: bool = True
     history_max_steps: int = 50
     ocr_lang: str = "eng"
+    # Module 1 processing pipeline defaults (used for Open PDF and Add External)
+    m1_apply_grayscale: bool = True
+    m1_apply_denoise: bool = True
+    m1_apply_deskew: bool = True
+    m1_apply_contrast: bool = True
+    m1_contrast_factor: float = 1.2
+    m1_apply_ocr_enhance: bool = False
+    m1_ocr_enhance_mode: str = "adaptive_binary"  # "adaptive_binary" | "gray"
     # Persisted UI layout (PanedWindow sash positions, pixels)
     sidebar_sash0: Optional[int] = None
     sidebar_sash1: Optional[int] = None
@@ -1220,6 +1228,13 @@ class ImageManagementUI:
             confirm_delete=True,
             history_max_steps=50,
             ocr_lang="eng",
+            m1_apply_grayscale=True,
+            m1_apply_denoise=True,
+            m1_apply_deskew=True,
+            m1_apply_contrast=True,
+            m1_contrast_factor=1.2,
+            m1_apply_ocr_enhance=False,
+            m1_ocr_enhance_mode="adaptive_binary",
             sidebar_sash0=None,
             sidebar_sash1=None,
             keymap=self._default_keymap(),
@@ -1242,6 +1257,13 @@ class ImageManagementUI:
                     confirm_delete=bool(data.get("confirm_delete", defaults.confirm_delete)),
                     history_max_steps=int(data.get("history_max_steps", defaults.history_max_steps)),
                     ocr_lang=str(data.get("ocr_lang", defaults.ocr_lang)),
+                    m1_apply_grayscale=bool(data.get("m1_apply_grayscale", defaults.m1_apply_grayscale)),
+                    m1_apply_denoise=bool(data.get("m1_apply_denoise", defaults.m1_apply_denoise)),
+                    m1_apply_deskew=bool(data.get("m1_apply_deskew", defaults.m1_apply_deskew)),
+                    m1_apply_contrast=bool(data.get("m1_apply_contrast", defaults.m1_apply_contrast)),
+                    m1_contrast_factor=float(data.get("m1_contrast_factor", defaults.m1_contrast_factor)),
+                    m1_apply_ocr_enhance=bool(data.get("m1_apply_ocr_enhance", defaults.m1_apply_ocr_enhance)),
+                    m1_ocr_enhance_mode=str(data.get("m1_ocr_enhance_mode", defaults.m1_ocr_enhance_mode)),
                     sidebar_sash0=sash0,
                     sidebar_sash1=sash1,
                     keymap=keymap,
@@ -1322,6 +1344,49 @@ class ImageManagementUI:
         ttk.Entry(general, textvariable=ocr_lang_var, width=20).grid(row=row, column=1, sticky=tk.W, pady=4)
         row += 1
 
+        ttk.Separator(general).grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 8))
+        row += 1
+
+        ttk.Label(general, text="Module 1 processing (Open PDF / Add External):").grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 4)
+        )
+        row += 1
+
+        m1_gray_var = tk.BooleanVar(value=bool(getattr(self.settings, "m1_apply_grayscale", True)))
+        m1_denoise_var = tk.BooleanVar(value=bool(getattr(self.settings, "m1_apply_denoise", True)))
+        m1_deskew_var = tk.BooleanVar(value=bool(getattr(self.settings, "m1_apply_deskew", True)))
+        m1_contrast_var = tk.BooleanVar(value=bool(getattr(self.settings, "m1_apply_contrast", True)))
+        m1_contrast_factor_var = tk.DoubleVar(value=float(getattr(self.settings, "m1_contrast_factor", 1.2)))
+        m1_ocr_enh_var = tk.BooleanVar(value=bool(getattr(self.settings, "m1_apply_ocr_enhance", False)))
+        m1_ocr_mode_var = tk.StringVar(value=str(getattr(self.settings, "m1_ocr_enhance_mode", "adaptive_binary")))
+
+        ttk.Checkbutton(general, text="Grayscale", variable=m1_gray_var).grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=2
+        )
+        row += 1
+        ttk.Checkbutton(general, text="Denoise", variable=m1_denoise_var).grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=2
+        )
+        row += 1
+        ttk.Checkbutton(general, text="Deskew", variable=m1_deskew_var).grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=2
+        )
+        row += 1
+
+        ttk.Checkbutton(general, text="Contrast", variable=m1_contrast_var).grid(row=row, column=0, sticky=tk.W, pady=2)
+        ttk.Entry(general, textvariable=m1_contrast_factor_var, width=10).grid(row=row, column=1, sticky=tk.W, pady=2)
+        row += 1
+
+        ttk.Checkbutton(general, text="OCR enhance", variable=m1_ocr_enh_var).grid(row=row, column=0, sticky=tk.W, pady=2)
+        ttk.Combobox(
+            general,
+            textvariable=m1_ocr_mode_var,
+            values=["adaptive_binary", "gray"],
+            width=16,
+            state="readonly",
+        ).grid(row=row, column=1, sticky=tk.W, pady=2)
+        row += 1
+
         # Shortcuts tab
         shortcuts = ttk.Frame(nb, padding="10")
         nb.add(shortcuts, text="Shortcuts")
@@ -1375,6 +1440,16 @@ class ImageManagementUI:
             self.settings.confirm_delete = bool(confirm_del_var.get())
             self.settings.history_max_steps = max(5, int(history_max_var.get()))
             self.settings.ocr_lang = (ocr_lang_var.get() or "eng").strip()
+            self.settings.m1_apply_grayscale = bool(m1_gray_var.get())
+            self.settings.m1_apply_denoise = bool(m1_denoise_var.get())
+            self.settings.m1_apply_deskew = bool(m1_deskew_var.get())
+            self.settings.m1_apply_contrast = bool(m1_contrast_var.get())
+            try:
+                self.settings.m1_contrast_factor = float(m1_contrast_factor_var.get())
+            except Exception:
+                self.settings.m1_contrast_factor = 1.2
+            self.settings.m1_apply_ocr_enhance = bool(m1_ocr_enh_var.get())
+            self.settings.m1_ocr_enhance_mode = (m1_ocr_mode_var.get() or "adaptive_binary").strip()
 
             # Persist shortcuts
             if self.settings.keymap is None:
@@ -1542,7 +1617,17 @@ class ImageManagementUI:
         
         try:
             processor = PDFImageProcessor()
-            images = processor.process_pdf(pdf_path, dpi=int(self.settings.default_dpi))
+            images = processor.process_pdf(
+                pdf_path,
+                dpi=int(self.settings.default_dpi),
+                apply_grayscale=bool(getattr(self.settings, "m1_apply_grayscale", True)),
+                apply_denoise=bool(getattr(self.settings, "m1_apply_denoise", True)),
+                apply_deskew=bool(getattr(self.settings, "m1_apply_deskew", True)),
+                apply_contrast=bool(getattr(self.settings, "m1_apply_contrast", True)),
+                contrast_factor=float(getattr(self.settings, "m1_contrast_factor", 1.2)),
+                apply_ocr_enhance=bool(getattr(self.settings, "m1_apply_ocr_enhance", False)),
+                ocr_enhance_mode=str(getattr(self.settings, "m1_ocr_enhance_mode", "adaptive_binary")),
+            )
             self.load_images(images)
             messagebox.showinfo("Success", f"Loaded {len(images)} pages from PDF")
         except Exception as e:
@@ -1564,7 +1649,17 @@ class ImageManagementUI:
             pil_image = Image.open(file_path)
             processor = PDFImageProcessor()
             page_num = len(self.processed_images) + 1
-            processed = processor.process_single_image(pil_image, page_number=page_num)
+            processed = processor.process_single_image(
+                pil_image,
+                page_number=page_num,
+                apply_grayscale=bool(getattr(self.settings, "m1_apply_grayscale", True)),
+                apply_denoise=bool(getattr(self.settings, "m1_apply_denoise", True)),
+                apply_deskew=bool(getattr(self.settings, "m1_apply_deskew", True)),
+                apply_contrast=bool(getattr(self.settings, "m1_apply_contrast", True)),
+                contrast_factor=float(getattr(self.settings, "m1_contrast_factor", 1.2)),
+                apply_ocr_enhance=bool(getattr(self.settings, "m1_apply_ocr_enhance", False)),
+                ocr_enhance_mode=str(getattr(self.settings, "m1_ocr_enhance_mode", "adaptive_binary")),
+            )
             self.processed_images.append(processed)
             self._update_listbox()
             self.current_index = len(self.processed_images) - 1
