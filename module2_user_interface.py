@@ -1007,6 +1007,46 @@ class ImageManagementUI:
         return max(1, min(8, n - 2))
 
     @staticmethod
+    def _parse_csv_delimiter(raw: object) -> str:
+        """
+        Parse user-friendly delimiter input.
+
+        Supported:
+        - single character: "," ";" "|" " " etc.
+        - keywords: "tab", "space"
+        - escapes: "\\t", "\\x09"
+
+        Not supported (will fall back to ","):
+        - newline delimiters like "\\n", "\\r", "enter" (CSV uses newline for rows)
+        """
+        s = ("" if raw is None else str(raw)).strip()
+        if not s:
+            return ","
+
+        low = s.lower()
+        if low in ("tab", "\\t"):
+            return "\t"
+        if low in ("space",):
+            return " "
+        if low in ("enter", "\\n", "\\r", "newline", "crlf"):
+            return ","
+
+        # Hex escape: \xNN
+        m = re.fullmatch(r"\\x([0-9a-fA-F]{2})", s)
+        if m:
+            ch = chr(int(m.group(1), 16))
+            if ch in ("\n", "\r"):
+                return ","
+            return ch
+
+        # If user literally typed multiple chars, reject
+        if len(s) != 1:
+            return ","
+        if s in ("\n", "\r"):
+            return ","
+        return s
+
+    @staticmethod
     def _median_int(vals: List[int], default: int) -> int:
         if not vals:
             return int(default)
@@ -1204,11 +1244,7 @@ class ImageManagementUI:
         return out
 
     def _write_csv(self, path: str, table: List[List[str]]):
-        delim = str(getattr(self.settings, "csv_delimiter", ",") or ",")
-        if delim.lower() in ("\\t", "tab"):
-            delim = "\t"
-        if len(delim) != 1:
-            delim = ","
+        delim = self._parse_csv_delimiter(getattr(self.settings, "csv_delimiter", ","))
         with open(path, "w", encoding="utf-8", newline="") as f:
             w = csv.writer(
                 f,
@@ -1783,12 +1819,7 @@ class ImageManagementUI:
                 sash1 = data.get("sidebar_sash1", defaults.sidebar_sash1)
                 sash0 = int(sash0) if sash0 is not None else None
                 sash1 = int(sash1) if sash1 is not None else None
-                csv_delim = data.get("csv_delimiter", defaults.csv_delimiter)
-                csv_delim = str(csv_delim) if csv_delim is not None else defaults.csv_delimiter
-                if csv_delim.lower() in ("\\t", "tab"):
-                    csv_delim = "\t"
-                if len(csv_delim) != 1:
-                    csv_delim = defaults.csv_delimiter
+                csv_delim = self._parse_csv_delimiter(data.get("csv_delimiter", defaults.csv_delimiter))
                 prefix_q = bool(data.get("csv_insert_prefix_quote", defaults.csv_insert_prefix_quote))
                 return UISettings(
                     default_dpi=int(data.get("default_dpi", defaults.default_dpi)),
@@ -1886,7 +1917,7 @@ class ImageManagementUI:
         ttk.Entry(general, textvariable=ocr_lang_var, width=20).grid(row=row, column=1, sticky=tk.W, pady=4)
         row += 1
 
-        ttk.Label(general, text="CSV delimiter (one char, or 'tab'):").grid(row=row, column=0, sticky=tk.W, pady=4)
+        ttk.Label(general, text="CSV delimiter (char or: tab, space, \\\\t, \\\\x09):").grid(row=row, column=0, sticky=tk.W, pady=4)
         ttk.Entry(general, textvariable=csv_delim_var, width=20).grid(row=row, column=1, sticky=tk.W, pady=4)
         row += 1
 
@@ -1979,12 +2010,17 @@ class ImageManagementUI:
             self.settings.confirm_delete = bool(confirm_del_var.get())
             self.settings.history_max_steps = max(5, int(history_max_var.get()))
             self.settings.ocr_lang = (ocr_lang_var.get() or "eng").strip()
-            delim = (csv_delim_var.get() or ",").strip()
-            if delim.lower() in ("\\t", "tab"):
-                delim = "\t"
-            if len(delim) != 1:
-                messagebox.showwarning("Settings", "CSV delimiter must be exactly 1 character (or 'tab'). Using ','.")
-                delim = ","
+            raw_delim = (csv_delim_var.get() or ",").strip()
+            delim = self._parse_csv_delimiter(raw_delim)
+            if delim == "," and raw_delim and raw_delim.strip() not in (",", "comma"):
+                # Likely invalid (e.g. "enter"/"\\n"/multi-char). Warn once.
+                messagebox.showwarning(
+                    "Settings",
+                    "CSV delimiter must be a single character.\n"
+                    "Supported keywords: tab, space. Supported escape: \\xNN.\n"
+                    "Note: Enter/newline cannot be used as a CSV delimiter.\n\n"
+                    "Using ','.",
+                )
             self.settings.csv_delimiter = delim
             self.settings.csv_insert_prefix_quote = bool(csv_prefix_quote_var.get())
             self.settings.m1_apply_grayscale = bool(m1_gray_var.get())
