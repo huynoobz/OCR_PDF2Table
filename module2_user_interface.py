@@ -788,6 +788,7 @@ class ImageManagementUI:
         file_menu.add_separator()
         file_menu.add_command(label="Export table (CSV) - current page…", command=self._export_table_csv_current)
         file_menu.add_command(label="Export table (CSV) - all pages…", command=self._export_table_csv_all)
+        file_menu.add_command(label="Export table (CSV) - wizard…", command=self._export_table_csv_wizard)
         file_menu.add_command(label="Settings…", command=self._open_settings_window)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.destroy)
@@ -1311,6 +1312,191 @@ class ImageManagementUI:
 
         return out
 
+    @staticmethod
+    def _parse_page_spec(raw: object, max_pages: int) -> List[int]:
+        """
+        Parse user input like:
+        - "1,2"         -> [0, 1]
+        - "1-5"         -> [0, 1, 2, 3, 4]
+        - "1-3,7,10-12" -> [0,1,2,6,9,10,11]
+
+        Notes:
+        - Pages are 1-based in the UI, returned indices are 0-based.
+        - Anything after ':' is ignored (so users can type examples like "1-5: pages 1 to 5").
+        """
+        if max_pages <= 0:
+            return []
+
+        s = str(raw or "").strip()
+        if not s:
+            return []
+
+        if ":" in s:
+            s = s.split(":", 1)[0].strip()
+
+        s = s.replace(";", ",")
+        if s.lower() in ("all", "*"):
+            return list(range(max_pages))
+
+        out: List[int] = []
+        seen = set()
+
+        for part in [p.strip() for p in s.split(",") if p.strip()]:
+            if "-" in part:
+                a_s, b_s = [x.strip() for x in part.split("-", 1)]
+                if not a_s or not b_s:
+                    return []
+                a = int(a_s)
+                b = int(b_s)
+                if a > b:
+                    a, b = b, a
+                for page in range(a, b + 1):
+                    if 1 <= page <= max_pages and page not in seen:
+                        out.append(page - 1)
+                        seen.add(page)
+                continue
+
+            page = int(part)
+            if 1 <= page <= max_pages and page not in seen:
+                out.append(page - 1)
+                seen.add(page)
+
+        return out
+
+    def _export_table_csv_pages(self, indices: List[int], out_path: str, *, title_hint: str):
+        """
+        Export a merged CSV for a specific set of 0-based page indices.
+        Uses the same behavior and progress UX as 'all pages' export.
+        """
+        indices = [i for i in indices if 0 <= i < len(self.processed_images)]
+        if not indices:
+            messagebox.showwarning("CSV", "No valid pages selected.")
+            return
+
+        cancelled = {"v": False}
+
+        win = tk.Toplevel(self.root)
+        win.title("Export table to CSV")
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+        ttk.Label(win, text=f"Exporting table (Detect table + OCR) … ({title_hint})").pack(anchor=tk.W, padx=10, pady=(10, 4))
+        status = ttk.Label(win, text="")
+        status.pack(anchor=tk.W, padx=10, pady=(0, 8))
+        pb = ttk.Progressbar(win, mode="determinate", maximum=max(1, len(indices)))
+        pb.pack(fill=tk.X, padx=10, pady=(0, 6))
+
+        ttk.Label(win, text="Cell OCR progress:").pack(anchor=tk.W, padx=10)
+        pb_cells = ttk.Progressbar(win, mode="determinate", maximum=1)
+        pb_cells.pack(fill=tk.X, padx=10, pady=(0, 10))
+        btns = ttk.Frame(win)
+        btns.pack(fill=tk.X, padx=10, pady=(0, 10))
+        ttk.Button(btns, text="Cancel", command=lambda: cancelled.__setitem__("v", True)).pack(side=tk.RIGHT)
+
+        # Disable closing via window X to avoid partial writes confusion (use Cancel)
+        win.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        try:
+            self.root.config(cursor="watch")
+            self.root.update_idletasks()
+
+            all_rows: List[List[str]] = []
+            skipped = 0
+
+            for step, i in enumerate(indices):
+                if cancelled["v"]:
+                    break
+
+                page_num = self.processed_images[i].metadata.page_number
+                status.config(text=f"Page {page_num} ({step + 1}/{len(indices)}): detecting table…")
+                pb["value"] = step
+                win.update_idletasks()
+
+                editor = self._ensure_editor(i)
+                if editor.table_cells_mask is None:
+                    ok = self._detect_table_for_index(i, show_masks=False)
+                    editor = self._ensure_editor(i)
+                    if not ok or editor.table_cells_mask is None:
+                        skipped += 1
+                        pb["value"] = step + 1
+                        win.update_idletasks()
+                        continue
+
+                self._ensure_cell_boxes(editor)
+                if not editor.table_cell_boxes:
+                    skipped += 1
+                    pb["value"] = step + 1
+                    win.update_idletasks()
+                    continue
+
+                base = editor.get_current_image()
+                if base is None:
+                    skipped += 1
+                    pb["value"] = step + 1
+                    win.update_idletasks()
+                    continue
+
+                grid_boxes = self._build_table_grid_boxes(editor.table_cell_boxes)
+                if not grid_boxes:
+                    skipped += 1
+                    pb["value"] = step + 1
+                    win.update_idletasks()
+                    continue
+
+                status.config(text=f"Page {page_num} ({step + 1}/{len(indices)}): OCR cells…")
+                win.update_idletasks()
+
+                table = self._ocr_table_grid_with_progress(
+                    base,
+                    grid_boxes,
+                    win=win,
+                    status=status,
+                    pb=pb_cells,
+                    cancelled=cancelled,
+                    page_num=page_num,
+                )
+                if not table:
+                    skipped += 1
+                    pb["value"] = step + 1
+                    win.update_idletasks()
+                    continue
+
+                all_rows.extend(table)
+
+                pb["value"] = step + 1
+                win.update_idletasks()
+
+            if cancelled["v"]:
+                messagebox.showwarning("CSV", "Export cancelled.")
+                return
+
+            if not all_rows:
+                messagebox.showwarning("CSV", "No table rows exported (all selected pages were skipped).")
+                return
+
+            status.config(text="Writing CSV…")
+            win.update_idletasks()
+            self._write_csv(out_path, all_rows)
+            if skipped:
+                messagebox.showinfo("CSV", f"Saved merged CSV to:\n{out_path}\n\nSkipped pages: {skipped}")
+            else:
+                messagebox.showinfo("CSV", f"Saved merged CSV to:\n{out_path}.")
+        except Exception as e:
+            messagebox.showerror("CSV", f"Export failed: {e}")
+        finally:
+            try:
+                self.root.config(cursor="")
+            except Exception:
+                pass
+            try:
+                win.grab_release()
+            except Exception:
+                pass
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
     def _export_table_csv_current(self):
         if self.current_index < 0 or self.current_index >= len(self.processed_images):
             messagebox.showwarning("CSV", "No page selected.")
@@ -1429,114 +1615,61 @@ class ImageManagementUI:
         )
         if not out_path:
             return
+        self._export_table_csv_pages(list(range(len(self.processed_images))), out_path, title_hint="all pages merged")
 
-        # Modal progress window to keep user patient during long OCR
-        cancelled = {"v": False}
+    def _export_table_csv_wizard(self):
+        if not self.processed_images:
+            messagebox.showwarning("CSV", "No images loaded.")
+            return
 
+        # Wizard: ask user for page selection spec
         win = tk.Toplevel(self.root)
-        win.title("Export table to CSV")
+        win.title("Export table (CSV) - wizard")
         win.transient(self.root)
         win.grab_set()
         win.resizable(False, False)
-        ttk.Label(win, text="Exporting table (Detect table + OCR) …").pack(anchor=tk.W, padx=10, pady=(10, 4))
-        status = ttk.Label(win, text="")
-        status.pack(anchor=tk.W, padx=10, pady=(0, 8))
-        pb = ttk.Progressbar(win, mode="determinate", maximum=max(1, len(self.processed_images)))
-        pb.pack(fill=tk.X, padx=10, pady=(0, 6))
 
-        ttk.Label(win, text="Cell OCR progress:").pack(anchor=tk.W, padx=10)
-        pb_cells = ttk.Progressbar(win, mode="determinate", maximum=1)
-        pb_cells.pack(fill=tk.X, padx=10, pady=(0, 10))
-        btns = ttk.Frame(win)
-        btns.pack(fill=tk.X, padx=10, pady=(0, 10))
-        ttk.Button(btns, text="Cancel", command=lambda: cancelled.__setitem__("v", True)).pack(side=tk.RIGHT)
-
-        # Disable closing via window X to avoid partial writes confusion (use Cancel)
-        win.protocol("WM_DELETE_WINDOW", lambda: None)
-
+        n = len(self.processed_images)
+        default_page = ""
         try:
-            self.root.config(cursor="watch")
-            self.root.update_idletasks()
+            if 0 <= self.current_index < n:
+                default_page = str(self.processed_images[self.current_index].metadata.page_number)
+        except Exception:
+            default_page = ""
+        if not default_page:
+            default_page = f"1-{n}" if n > 1 else "1"
 
-            all_rows: List[List[str]] = []
+        var = tk.StringVar(value=default_page)
 
-            for i in range(len(self.processed_images)):
-                if cancelled["v"]:
-                    break
+        ttk.Label(win, text="Select pages to export (1-based):").grid(row=0, column=0, sticky=tk.W, padx=10, pady=(10, 2))
+        ent = ttk.Entry(win, textvariable=var, width=28)
+        ent.grid(row=1, column=0, sticky=tk.W, padx=10)
+        ttk.Label(
+            win,
+            text="Examples: 1,2   or   1-5   or   1-3,7,10-12",
+        ).grid(row=2, column=0, sticky=tk.W, padx=10, pady=(4, 8))
 
-                page_num = self.processed_images[i].metadata.page_number
-                status.config(text=f"Page {page_num} / {len(self.processed_images)}: detecting table…")
-                pb["value"] = i
-                win.update_idletasks()
+        btns = ttk.Frame(win)
+        btns.grid(row=3, column=0, sticky=tk.E, padx=10, pady=(0, 10))
 
-                editor = self._ensure_editor(i)
-                if editor.table_cells_mask is None:
-                    status.config(text=f"Page {page_num}: detecting table…")
-                    win.update_idletasks()
-                    ok = self._detect_table_for_index(i, show_masks=False)
-                    editor = self._ensure_editor(i)
-                    if not ok or editor.table_cells_mask is None:
-                        pb["value"] = i + 1
-                        win.update_idletasks()
-                        continue
-
-                self._ensure_cell_boxes(editor)
-                if not editor.table_cell_boxes:
-                    pb["value"] = i + 1
-                    win.update_idletasks()
-                    continue
-
-                base = editor.get_current_image()
-                if base is None:
-                    pb["value"] = i + 1
-                    win.update_idletasks()
-                    continue
-
-                grid_boxes = self._build_table_grid_boxes(editor.table_cell_boxes)
-                if not grid_boxes:
-                    pb["value"] = i + 1
-                    win.update_idletasks()
-                    continue
-
-                status.config(text=f"Page {page_num} / {len(self.processed_images)}: OCR cells…")
-                win.update_idletasks()
-
-                table = self._ocr_table_grid_with_progress(
-                    base,
-                    grid_boxes,
-                    win=win,
-                    status=status,
-                    pb=pb_cells,
-                    cancelled=cancelled,
-                    page_num=page_num,
-                )
-                if not table:
-                    pb["value"] = i + 1
-                    win.update_idletasks()
-                    continue
-
-                for r in table:
-                    all_rows.append(r)
-
-                pb["value"] = i + 1
-                win.update_idletasks()
-
-            if cancelled["v"]:
-                messagebox.showwarning("CSV", "Export cancelled.")
+        def do_export():
+            spec = var.get()
+            try:
+                indices = self._parse_page_spec(spec, n)
+            except Exception:
+                indices = []
+            if not indices:
+                messagebox.showerror("CSV", f"Invalid page selection.\n\nUse examples like: 1,2 or 1-5\nValid range: 1-{n}")
                 return
 
+            out_path = filedialog.asksaveasfilename(
+                title="Save table CSV (selected pages merged)",
+                defaultextension=".csv",
+                filetypes=[("CSV", "*.csv"), ("All files", "*.*")],
+            )
+            if not out_path:
+                return
 
-            status.config(text="Writing CSV…")
-            win.update_idletasks()
-            self._write_csv(out_path, all_rows)
-            messagebox.showinfo("CSV", f"Saved merged CSV to:\n{out_path}.")
-        except Exception as e:
-            messagebox.showerror("CSV", f"Export failed: {e}")
-        finally:
-            try:
-                self.root.config(cursor="")
-            except Exception:
-                pass
             try:
                 win.grab_release()
             except Exception:
@@ -1545,6 +1678,16 @@ class ImageManagementUI:
                 win.destroy()
             except Exception:
                 pass
+
+            title_hint = f"pages: {spec.split(':', 1)[0].strip()}"
+            self._export_table_csv_pages(indices, out_path, title_hint=title_hint)
+
+        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Button(btns, text="Export", command=do_export).pack(side=tk.RIGHT)
+
+        ent.focus_set()
+        ent.selection_range(0, tk.END)
+        ent.bind("<Return>", lambda _e: do_export())
 
     def _ensure_editor(self, idx: int) -> ImageEditor:
         if idx not in self.image_editors:
