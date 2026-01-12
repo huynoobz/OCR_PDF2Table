@@ -1077,6 +1077,39 @@ class ImageManagementUI:
 
         return grid
 
+    @staticmethod
+    def _count_non_empty_grid(grid_boxes: List[List[Optional[tuple[int, int, int, int]]]]) -> int:
+        return int(sum(1 for row in grid_boxes for box in row if box is not None))
+
+    def _is_valid_table_grid(
+        self,
+        base: Image.Image,
+        grid_boxes: List[List[Optional[tuple[int, int, int, int]]]],
+        boxes: List[tuple[int, int, int, int]],
+    ) -> bool:
+        """
+        Heuristic validation so we don't OCR a giant non-table region as a 'cell'.
+        """
+        if not grid_boxes:
+            return False
+        rows = len(grid_boxes)
+        cols = len(grid_boxes[0]) if rows else 0
+        if rows < 2 or cols < 2:
+            return False
+        filled = self._count_non_empty_grid(grid_boxes)
+        if filled < 4:
+            return False
+
+        img_w, img_h = base.size
+        img_area = max(1, int(img_w * img_h))
+        max_box_area = 0
+        for (l, t, r, b) in boxes:
+            max_box_area = max(max_box_area, int(max(1, (r - l) * (b - t))))
+        # If a "cell" covers most of the page, it's almost certainly not a real table cell grid.
+        if max_box_area > int(0.70 * img_area):
+            return False
+        return True
+
     def _ocr_table_grid(self, base: Image.Image, grid_boxes: List[List[Optional[tuple[int, int, int, int]]]]) -> List[List[str]]:
         lang = str(getattr(self.settings, "ocr_lang", "eng") or "eng").strip()
         prefix_quote = bool(getattr(self.settings, "csv_insert_prefix_quote", False))
@@ -1227,6 +1260,13 @@ class ImageManagementUI:
             if not grid_boxes:
                 messagebox.showerror("CSV", "Failed to build a table grid from detected cells.")
                 return
+            if not self._is_valid_table_grid(base, grid_boxes, editor.table_cell_boxes):
+                messagebox.showwarning(
+                    "CSV",
+                    "Detected cells do not form a valid table grid (maybe no table on this page).\n"
+                    "Try adjusting table detection settings or skip this page.",
+                )
+                return
             status.config(text=f"Page {page_num}: OCR…")
             win.update_idletasks()
             table = self._ocr_table_grid_with_progress(
@@ -1334,6 +1374,12 @@ class ImageManagementUI:
 
                 grid_boxes = self._build_table_grid_boxes(editor.table_cell_boxes)
                 if not grid_boxes:
+                    skipped += 1
+                    pb["value"] = i + 1
+                    win.update_idletasks()
+                    continue
+
+                if not self._is_valid_table_grid(base, grid_boxes, editor.table_cell_boxes):
                     skipped += 1
                     pb["value"] = i + 1
                     win.update_idletasks()
