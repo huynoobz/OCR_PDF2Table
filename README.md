@@ -12,19 +12,79 @@ GUI module for visual inspection, manipulation, and export of processed images.
 
 ## Installation
 
+### 1) Python dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
-**Note:** For `pdf2image`, you may need to install `poppler`:
+### 2) Poppler (required for PDF → images)
+
+`pdf2image` relies on Poppler on Windows (and commonly on other platforms) to rasterize PDFs.
+
 - Windows: Download from [poppler-windows](https://github.com/oschwartz10612/poppler-windows/releases/)
+  - After download, either add Poppler `bin` to your PATH, or use the portable EXE layout described below (`vendor\poppler\...`)
 - Linux: `sudo apt-get install poppler-utils`
 - macOS: `brew install poppler`
 
-**Note:** For OCR (`pytesseract`), you must install **Tesseract OCR**:
-- Windows: install via the official installer or a trusted distribution, then ensure `tesseract.exe` is on PATH
-- Linux: `sudo apt-get install tesseract-ocr`
-- macOS: `brew install tesseract`
+### 3) Tesseract OCR (required for OCR)
+
+`pytesseract` is a Python wrapper, but you still must install **Tesseract OCR** itself.
+
+- Windows:
+  - Install Tesseract (a common choice is the UB-Mannheim Windows installer).
+  - Ensure `tesseract.exe` is on PATH (or use the portable EXE layout described below: `vendor\tesseract\...`).
+- Linux:
+  - `sudo apt-get install tesseract-ocr`
+- macOS:
+  - `brew install tesseract`
+
+### 4) Install OCR language traineddata
+
+Tesseract uses `*.traineddata` language packs (e.g. `eng.traineddata`, `vie.traineddata`).
+
+- Windows:
+  - Find your `tessdata` folder (typical locations):
+    - `C:\Program Files\Tesseract-OCR\tessdata`
+    - or if using portable layout: `vendor\tesseract\tessdata`
+  - Download the languages you need and put the `*.traineddata` files into that `tessdata` folder.
+  - If Tesseract can’t find languages, set an environment variable:
+    - `TESSDATA_PREFIX` = path to the `tessdata` folder
+- Linux:
+  - Install languages via packages (example):
+    - `sudo apt-get install tesseract-ocr-eng tesseract-ocr-vie`
+- macOS:
+  - Homebrew usually ships English; for more languages, install additional language files or point `TESSDATA_PREFIX` to your `tessdata`.
+
+Language data downloads (official repo):
+- Best-trained models: `https://github.com/tesseract-ocr/tessdata_best`
+- Fast models: `https://github.com/tesseract-ocr/tessdata_fast`
+
+In the app, set the OCR language in **Settings → OCR language** (example values: `eng`, `vie`, or multi-lang like `eng+vie`).
+
+## Set up a dev environment (recommended)
+
+### Windows (PowerShell)
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -U pip
+pip install -r requirements.txt
+python main.py ui
+```
+
+### macOS / Linux (bash/zsh)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+pip install -r requirements.txt
+python main.py ui
+```
+
+If you get PDF loading errors, verify Poppler is installed and available. If OCR fails, verify `tesseract` is installed and that your selected `ocr_lang` exists in `tessdata`.
 
 ## Build a single-file EXE (Windows)
 
