@@ -1117,6 +1117,60 @@ class ImageManagementUI:
             return False
         return True
 
+    def _detect_best_table_grid_for_export(
+        self,
+        base_img: Image.Image,
+        *,
+        rotations: tuple[int, ...] = (0, 180),
+    ) -> Optional[tuple[Image.Image, List[List[Optional[tuple[int, int, int, int]]]]]]:
+        """
+        Try table detection for multiple rotations and pick the grid with the most filled cells.
+        Intended for export robustness (e.g., upside-down pages).
+        Returns (image_to_ocr, grid_boxes) or None.
+        """
+
+        def boxes_from_cells_mask(cells_mask: np.ndarray) -> List[tuple[int, int, int, int]]:
+            if cells_mask is None:
+                return []
+            cells_u8 = cells_mask.astype(np.uint8)
+            _, bin_mask = cv2.threshold(cells_u8, 0, 255, cv2.THRESH_BINARY)
+            num, labels, stats, _ = cv2.connectedComponentsWithStats(bin_mask, connectivity=8)
+            out: List[tuple[int, int, int, int]] = []
+            for label in range(1, num):
+                x = int(stats[label, cv2.CC_STAT_LEFT])
+                y = int(stats[label, cv2.CC_STAT_TOP])
+                w = int(stats[label, cv2.CC_STAT_WIDTH])
+                h = int(stats[label, cv2.CC_STAT_HEIGHT])
+                if w < 5 or h < 5:
+                    continue
+                out.append((x, y, x + w, y + h))
+            return out
+
+        best_score: int = -1
+        best_img: Optional[Image.Image] = None
+        best_grid: Optional[List[List[Optional[tuple[int, int, int, int]]]]] = None
+
+        for deg in rotations:
+            img = base_img if deg == 0 else base_img.rotate(deg, expand=False)
+            img_np = np.array(img.convert("RGB"))
+            line_mask = PDFImageProcessor.detect_table_lines(img_np)
+            cells = PDFImageProcessor.detect_table_cells_mask_from_lines(line_mask)
+            boxes = boxes_from_cells_mask(cells)
+            if not boxes:
+                continue
+            grid = self._build_table_grid_boxes(boxes)
+            if not grid:
+                continue
+            score = self._count_non_empty_grid(grid)
+            if score > best_score:
+                best_score = score
+                best_img = img
+                best_grid = grid
+
+        if best_img is None or best_grid is None:
+            return None
+        return (best_img, best_grid)
+
     def _ocr_table_grid(self, base: Image.Image, grid_boxes: List[List[Optional[tuple[int, int, int, int]]]]) -> List[List[str]]:
         """
         Parallel OCR (per-cell) without UI progress. Used by all-pages export.
@@ -1293,17 +1347,16 @@ class ImageManagementUI:
             if not grid_boxes:
                 messagebox.showerror("CSV", "Failed to build a table grid from detected cells.")
                 return
-            if not self._is_valid_table_grid(base, grid_boxes, editor.table_cell_boxes):
-                messagebox.showwarning(
-                    "CSV",
-                    "Detected cells do not form a valid table grid (maybe no table on this page).\n"
-                    "Try adjusting table detection settings or skip this page.",
-                )
-                return
+
+            # If the page is upside-down, prefer the best detection between 0° and 180° for export OCR.
+            best = self._detect_best_table_grid_for_export(base, rotations=(0, 180))
+            base_for_ocr = base
+            if best is not None:
+                base_for_ocr, grid_boxes = best
             status.config(text=f"Page {page_num}: OCR…")
             win.update_idletasks()
             table = self._ocr_table_grid_with_progress(
-                base,
+                base_for_ocr,
                 grid_boxes,
                 win=win,
                 status=status,
@@ -1387,14 +1440,7 @@ class ImageManagementUI:
                 pb["value"] = i
                 win.update_idletasks()
 
-                ok = self._detect_table_for_index(i, show_masks=False)
                 editor = self._ensure_editor(i)
-                if not ok or not editor.table_cell_boxes:
-                    skipped += 1
-                    pb["value"] = i + 1
-                    win.update_idletasks()
-                    continue
-
                 base = editor.get_base_image() or editor.get_current_image() or self.processed_images[i].pil_image
                 if base is None:
                     skipped += 1
@@ -1402,23 +1448,18 @@ class ImageManagementUI:
                     win.update_idletasks()
                     continue
 
+                best = self._detect_best_table_grid_for_export(base, rotations=(0, 180))
+                if best is None:
+                    skipped += 1
+                    pb["value"] = i + 1
+                    win.update_idletasks()
+                    continue
+                base_for_ocr, grid_boxes = best
+
                 status.config(text=f"Page {page_num} / {len(self.processed_images)}: OCR cells…")
                 win.update_idletasks()
 
-                grid_boxes = self._build_table_grid_boxes(editor.table_cell_boxes)
-                if not grid_boxes:
-                    skipped += 1
-                    pb["value"] = i + 1
-                    win.update_idletasks()
-                    continue
-
-                if not self._is_valid_table_grid(base, grid_boxes, editor.table_cell_boxes):
-                    skipped += 1
-                    pb["value"] = i + 1
-                    win.update_idletasks()
-                    continue
-
-                table = self._ocr_table_grid(base, grid_boxes)
+                table = self._ocr_table_grid(base_for_ocr, grid_boxes)
                 if not table:
                     skipped += 1
                     pb["value"] = i + 1
