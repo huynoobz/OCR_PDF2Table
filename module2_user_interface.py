@@ -1114,11 +1114,15 @@ class ImageManagementUI:
             return
         editor = self._ensure_editor(self.current_index)
         if editor.table_cells_mask is None:
-            messagebox.showwarning("CSV", "No table detected for this page. Run Edit → Detect table first.")
-            return
+            # Auto-detect on demand
+            ok = self._detect_table_for_index(self.current_index, show_masks=False)
+            editor = self._ensure_editor(self.current_index)
+            if not ok or editor.table_cells_mask is None:
+                messagebox.showwarning("CSV", "Detect table failed for this page.")
+                return
         self._ensure_cell_boxes(editor)
         if not editor.table_cell_boxes:
-            messagebox.showwarning("CSV", "No cells found. Run Edit → Detect table first.")
+            messagebox.showwarning("CSV", "No cells found (after Detect table).")
             return
         base = editor.get_base_image() or editor.get_current_image()
         if base is None:
@@ -1155,43 +1159,123 @@ class ImageManagementUI:
         if not self.processed_images:
             messagebox.showwarning("CSV", "No images loaded.")
             return
-        out_dir = filedialog.askdirectory(title="Select output folder for CSV files")
-        if not out_dir:
+
+        out_path = filedialog.asksaveasfilename(
+            title="Save table CSV (all pages merged)",
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv"), ("All files", "*.*")],
+        )
+        if not out_path:
             return
+
+        # Modal progress window to keep user patient during long OCR
+        cancelled = {"v": False}
+
+        win = tk.Toplevel(self.root)
+        win.title("Export table to CSV")
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+        ttk.Label(win, text="Exporting table (Detect table + OCR) …").pack(anchor=tk.W, padx=10, pady=(10, 4))
+        status = ttk.Label(win, text="")
+        status.pack(anchor=tk.W, padx=10, pady=(0, 8))
+        pb = ttk.Progressbar(win, mode="determinate", maximum=max(1, len(self.processed_images)))
+        pb.pack(fill=tk.X, padx=10, pady=(0, 10))
+        btns = ttk.Frame(win)
+        btns.pack(fill=tk.X, padx=10, pady=(0, 10))
+        ttk.Button(btns, text="Cancel", command=lambda: cancelled.__setitem__("v", True)).pack(side=tk.RIGHT)
+
+        # Disable closing via window X to avoid partial writes confusion (use Cancel)
+        win.protocol("WM_DELETE_WINDOW", lambda: None)
 
         try:
             self.root.config(cursor="watch")
             self.root.update_idletasks()
-            exported = 0
+
+            all_rows: List[List[str]] = []
+            max_cols = 0
             skipped = 0
-            for idx, processed in enumerate(self.processed_images):
-                editor = self._ensure_editor(idx)
-                if editor.table_cells_mask is None:
+
+            for i in range(len(self.processed_images)):
+                if cancelled["v"]:
+                    break
+
+                page_num = self.processed_images[i].metadata.page_number
+                status.config(text=f"Page {page_num} / {len(self.processed_images)}: detecting table…")
+                pb["value"] = i
+                win.update_idletasks()
+
+                ok = self._detect_table_for_index(i, show_masks=False)
+                editor = self._ensure_editor(i)
+                if not ok or not editor.table_cell_boxes:
                     skipped += 1
+                    pb["value"] = i + 1
+                    win.update_idletasks()
                     continue
-                self._ensure_cell_boxes(editor)
-                if not editor.table_cell_boxes:
-                    skipped += 1
-                    continue
-                base = editor.get_base_image() or editor.get_current_image() or processed.pil_image
+
+                base = editor.get_base_image() or editor.get_current_image() or self.processed_images[i].pil_image
                 if base is None:
                     skipped += 1
+                    pb["value"] = i + 1
+                    win.update_idletasks()
                     continue
+
+                status.config(text=f"Page {page_num} / {len(self.processed_images)}: OCR cells…")
+                win.update_idletasks()
+
                 grid_boxes = self._build_table_grid_boxes(editor.table_cell_boxes)
                 if not grid_boxes:
                     skipped += 1
+                    pb["value"] = i + 1
+                    win.update_idletasks()
                     continue
-                table = self._ocr_table_grid(base, grid_boxes)
-                out_path = os.path.join(out_dir, f"page_{processed.metadata.page_number:03d}.csv")
-                self._write_csv(out_path, table)
-                exported += 1
 
-            messagebox.showinfo("CSV", f"Exported {exported} CSV file(s).\nSkipped {skipped} page(s) (no detected table).")
+                table = self._ocr_table_grid(base, grid_boxes)
+                if not table:
+                    skipped += 1
+                    pb["value"] = i + 1
+                    win.update_idletasks()
+                    continue
+
+                # Keep one merged table: append rows per page. Normalize columns as we go.
+                page_cols = max((len(r) for r in table), default=0)
+                if page_cols > max_cols:
+                    for r in all_rows:
+                        r.extend([""] * (page_cols - max_cols))
+                    max_cols = page_cols
+                for r in table:
+                    if len(r) < max_cols:
+                        r = r + [""] * (max_cols - len(r))
+                    all_rows.append(r)
+
+                pb["value"] = i + 1
+                win.update_idletasks()
+
+            if cancelled["v"]:
+                messagebox.showwarning("CSV", "Export cancelled.")
+                return
+
+            if not all_rows:
+                messagebox.showwarning("CSV", f"No tables exported. Skipped {skipped} page(s).")
+                return
+
+            status.config(text="Writing CSV…")
+            win.update_idletasks()
+            self._write_csv(out_path, all_rows)
+            messagebox.showinfo("CSV", f"Saved merged CSV to:\n{out_path}\nSkipped {skipped} page(s) (no detected table).")
         except Exception as e:
             messagebox.showerror("CSV", f"Export failed: {e}")
         finally:
             try:
                 self.root.config(cursor="")
+            except Exception:
+                pass
+            try:
+                win.grab_release()
+            except Exception:
+                pass
+            try:
+                win.destroy()
             except Exception:
                 pass
 
@@ -1265,6 +1349,33 @@ class ImageManagementUI:
     # ----------------------------
     # Table detection (mask overlays)
     # ----------------------------
+    def _detect_table_for_index(self, idx: int, *, show_masks: bool = True) -> bool:
+        """
+        Detect table lines + cells for a specific page index.
+        Returns True if cells mask exists and has at least one cell box; otherwise False.
+        """
+        if idx < 0 or idx >= len(self.processed_images):
+            return False
+        editor = self._ensure_editor(idx)
+        base = editor.get_base_image() or editor.get_current_image()
+        if base is None:
+            return False
+        img_np = np.array(base.convert("RGB"))
+        line_mask = PDFImageProcessor.detect_table_lines(img_np)
+        editor.set_table_mask(Image.fromarray(line_mask, mode="L"))
+
+        # Cells must be derived from line mask separators
+        cells = PDFImageProcessor.detect_table_cells_mask_from_lines(line_mask)
+        editor.set_table_cells_mask(Image.fromarray(cells, mode="L"))
+
+        # Quick sanity: does it produce any boxes?
+        self._ensure_cell_boxes(editor)
+        ok = bool(editor.table_cell_boxes)
+        if show_masks:
+            self.show_table_mask_var.set(True)
+            self.show_table_cells_var.set(True)
+        return ok
+
     def _detect_table(self):
         """Detect table lines + cells mask for all selected images (or current)."""
         targets = self._get_selected_indices_or_current()
@@ -1273,19 +1384,7 @@ class ImageManagementUI:
             return
 
         for idx in targets:
-            editor = self._ensure_editor(idx)
-            base = editor.get_base_image()
-            if base is None:
-                base = editor.get_current_image()
-            if base is None:
-                continue
-            img_np = np.array(base.convert("RGB"))
-            line_mask = PDFImageProcessor.detect_table_lines(img_np)
-            editor.set_table_mask(Image.fromarray(line_mask, mode="L"))
-
-            # Cells must be derived from line mask separators
-            cells = PDFImageProcessor.detect_table_cells_mask_from_lines(line_mask)
-            editor.set_table_cells_mask(Image.fromarray(cells, mode="L"))
+            self._detect_table_for_index(idx, show_masks=False)
 
         self.show_table_mask_var.set(True)
         self.show_table_cells_var.set(True)
