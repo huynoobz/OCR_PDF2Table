@@ -1013,13 +1013,16 @@ class ImageManagementUI:
 
         for idx in targets:
             editor = self._ensure_editor(idx)
-            base = editor.get_base_image()
-            if base is None:
-                base = editor.get_current_image()
-            if base is None:
-                continue
-            img_np = np.array(base.convert("RGB"))
-            cells = PDFImageProcessor.detect_table_cells_mask(img_np)
+            # Require line detection first and use stored line mask as boundaries.
+            if editor.table_mask is None:
+                messagebox.showwarning(
+                    "Detect table cells",
+                    "Please run 'Detect table lines' first (cells detection uses the line mask as separators).",
+                )
+                return
+
+            line_mask = np.array(editor.table_mask.convert("L"))
+            cells = PDFImageProcessor.detect_table_cells_mask_from_lines(line_mask)
             editor.set_table_cells_mask(Image.fromarray(cells, mode="L"))
 
         self.show_table_cells_var.set(True)

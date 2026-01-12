@@ -475,6 +475,7 @@ class PDFImageProcessor:
         - Connected components → keep components that look like cell interiors
           (exclude background/huge component, tiny noise)
         """
+        # Wrapper (legacy): compute lines first, then derive cells from those lines.
         line_mask = PDFImageProcessor.detect_table_lines(
             img_array,
             adaptive_block_size=adaptive_block_size,
@@ -487,9 +488,46 @@ class PDFImageProcessor:
             min_component_length_px=min_component_length_px,
             intersection_dilate_px=intersection_dilate_px,
         )
+        return PDFImageProcessor.detect_table_cells_mask_from_lines(
+            line_mask,
+            line_dilate_px=line_dilate_px,
+            min_cell_area_px=min_cell_area_px,
+            max_cell_area_ratio=max_cell_area_ratio,
+            min_cell_width_px=min_cell_width_px,
+            min_cell_height_px=min_cell_height_px,
+        )
 
-        if line_mask is None or cv2.countNonZero(line_mask) == 0:
-            return np.zeros(img_array.shape[:2], dtype=np.uint8)
+    @staticmethod
+    def detect_table_cells_mask_from_lines(
+        line_mask: np.ndarray,
+        *,
+        line_dilate_px: int = 3,
+        line_close_px: int = 3,
+        min_cell_area_px: int = 200,
+        max_cell_area_ratio: float = 0.90,
+        min_cell_width_px: int = 10,
+        min_cell_height_px: int = 10,
+    ) -> np.ndarray:
+        """
+        Derive a cell-interior mask from a *precomputed* table line mask.
+
+        Important:
+        - This uses the line mask as boundaries, so each cell region is separated by line pixels.
+        - If the line mask has gaps, we apply a small CLOSE and DILATE to seal boundaries.
+        """
+        if line_mask is None:
+            raise ValueError("line_mask is None")
+
+        if line_mask.dtype != np.uint8:
+            line_mask = line_mask.astype(np.uint8)
+
+        # Ensure 2D
+        if line_mask.ndim != 2:
+            raise ValueError("line_mask must be a 2D uint8 image")
+
+        h, w = line_mask.shape[:2]
+        if cv2.countNonZero(line_mask) == 0:
+            return np.zeros((h, w), dtype=np.uint8)
 
         ys, xs = np.where(line_mask > 0)
         y0, y1 = int(ys.min()), int(ys.max())
@@ -497,17 +535,24 @@ class PDFImageProcessor:
 
         # Add a small margin
         pad = 2
-        h, w = line_mask.shape[:2]
         x0 = max(0, x0 - pad)
         y0 = max(0, y0 - pad)
         x1 = min(w - 1, x1 + pad)
         y1 = min(h - 1, y1 + pad)
 
         roi_lines = line_mask[y0 : y1 + 1, x0 : x1 + 1]
+
+        # Close small gaps in lines (so cells don't merge through broken borders)
+        k_close = max(1, int(line_close_px))
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_close, k_close))
+        roi_lines_c = cv2.morphologyEx(roi_lines, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+
+        # Dilate lines to create thicker separators
         k = max(1, int(line_dilate_px))
         dil_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-        roi_lines_d = cv2.dilate(roi_lines, dil_kernel, iterations=1)
+        roi_lines_d = cv2.dilate(roi_lines_c, dil_kernel, iterations=1)
 
+        # Invert: regions between lines become components (candidate cells)
         roi_inv = cv2.bitwise_not(roi_lines_d)
 
         num, labels, stats, _ = cv2.connectedComponentsWithStats(roi_inv, connectivity=8)
