@@ -545,64 +545,11 @@ class ImageManagementUI:
         self._pending_view_refresh_after_id: Optional[str] = None
         self._file_menu: Optional[tk.Menu] = None
         self._file_menu_ocr_index: Optional[int] = None
-        self._space_hand_active: bool = False
-        self._space_prev_tool: Optional[str] = None
         
         # Create UI
         self._create_ui()
         self._apply_settings_to_ui()
         self._bind_shortcuts()
-        self._bind_space_hand()
-
-    def _bind_space_hand(self):
-        """Hold Space to temporarily switch to Hand tool (Photoshop-like)."""
-        # Prevent focused ttk widgets (especially tool radiobuttons) from treating Space as "activate",
-        # which can switch tools back while Space is still held.
-        def swallow_space(event):
-            if self._should_ignore_shortcut(event):
-                return None
-            return "break"
-
-        for cls in ("TRadiobutton", "TButton", "TMenubutton"):
-            try:
-                self.root.bind_class(cls, "<KeyPress-space>", swallow_space, add="+")
-                self.root.bind_class(cls, "<KeyRelease-space>", swallow_space, add="+")
-            except Exception:
-                pass
-
-        def on_press(event):
-            if self._should_ignore_shortcut(event):
-                return
-            if self._space_hand_active:
-                return "break"
-            # Only activate if we're not already hand
-            if not hasattr(self, "active_tool"):
-                return "break"
-            current = self.active_tool.get()
-            if current == "hand":
-                return "break"
-            self._space_prev_tool = current
-            self._space_hand_active = True
-            self.active_tool.set("hand")
-            self._apply_active_tool()
-            # Prevent focused widgets (e.g., radiobuttons) from handling Space and switching tools back
-            return "break"
-
-        def on_release(event):
-            if self._should_ignore_shortcut(event):
-                return
-            if not self._space_hand_active:
-                return "break"
-            self._space_hand_active = False
-            if self._space_prev_tool and hasattr(self, "active_tool"):
-                self.active_tool.set(self._space_prev_tool)
-                self._space_prev_tool = None
-                self._apply_active_tool()
-            return "break"
-
-        # bind_all so it works regardless of focus (except when typing)
-        self.root.bind_all("<KeyPress-space>", on_press)
-        self.root.bind_all("<KeyRelease-space>", on_release)
     
     def _create_ui(self):
         """Create the user interface."""
@@ -630,7 +577,8 @@ class ImageManagementUI:
         main_pane.add(right_panel, weight=1)
         main_pane.add(list_panel, weight=0)
 
-        self._create_tools_panel(tools_panel)
+        # Left sidebar: OCR result box only (no tool list)
+        self._create_ocr_sidebar(tools_panel)
 
         list_label = ttk.Label(list_panel, text="Images")
         list_label.pack(fill=tk.X, pady=(0, 5))
@@ -672,9 +620,12 @@ class ImageManagementUI:
         self.canvas.pack(fill=tk.BOTH, expand=True)
         
         self.viewer = ImageViewer(self.canvas)
-        # Initialize tool bindings now that canvas/viewer exist
-        if hasattr(self, "active_tool"):
-            self._apply_active_tool()
+        # Fused tools:
+        # - Left drag pan (ImageViewer bindings)
+        # - Wheel zoom (ImageViewer bindings)
+        # - Right click: cell context menu (after Detect table)
+        self.canvas.bind("<Button-3>", self._on_canvas_right_click)
+        self.viewer._bind_viewer_events()
         
         # Navigation controls
         nav_frame = ttk.Frame(viewer_frame)
@@ -728,134 +679,20 @@ class ImageManagementUI:
                 if 0 <= self.current_index < len(self.processed_images):
                     self._view_state_by_index[self.current_index] = self.viewer.get_view_state()
 
-    # ----------------------------
-    # Tools palette
-    # ----------------------------
-    def _create_tools_panel(self, parent: ttk.Frame):
-        """Create a vertical tools palette (left side)."""
-        ttk.Label(parent, text="Tools").pack(anchor=tk.W, pady=(0, 6))
+    def _create_ocr_sidebar(self, parent: ttk.Frame):
+        """Left sidebar: OCR result box only (no tool list)."""
+        ttk.Label(parent, text="OCR").pack(anchor=tk.W, pady=(0, 6))
 
-        self.active_tool = tk.StringVar(value="hand")
+        ttk.Label(parent, text="Result:").pack(anchor=tk.W)
+        self.ocr_text = tk.Text(parent, height=16, wrap=tk.WORD)
+        self.ocr_text.pack(fill=tk.BOTH, expand=True, pady=(2, 6))
 
-        def tool_btn(text: str, value: str):
-            b = ttk.Radiobutton(
-                parent,
-                text=text,
-                value=value,
-                variable=self.active_tool,
-                command=self._apply_active_tool,
-            )
-            b.pack(fill=tk.X, pady=2)
+        btns = ttk.Frame(parent)
+        btns.pack(fill=tk.X)
+        ttk.Button(btns, text="Detect text", command=self._ocr_to_textbox).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
+        ttk.Button(btns, text="Export…", command=self._ocr_selected_cells).pack(side=tk.LEFT, expand=True, fill=tk.X)
 
-        tool_btn("Hand (Pan)", "hand")
-        tool_btn("Zoom", "zoom")
-        tool_btn("Cell Select (OCR)", "cell_select")
-
-        ttk.Separator(parent).pack(fill=tk.X, pady=8)
-
-        # OCR panel (shown when Cell Select is active)
-        self._ocr_panel = ttk.LabelFrame(parent, text="OCR", padding="6")
-        self._ocr_panel.pack(fill=tk.BOTH, expand=False)
-        self._ocr_panel.pack_forget()  # hidden by default; shown when tool == cell_select
-
-        ttk.Label(self._ocr_panel, text="Result:").pack(anchor=tk.W)
-        self.ocr_text = tk.Text(self._ocr_panel, height=8, wrap=tk.WORD)
-        self.ocr_text.pack(fill=tk.BOTH, expand=True, pady=(2, 4))
-
-        ocr_btns = ttk.Frame(self._ocr_panel)
-        ocr_btns.pack(fill=tk.X)
-        ttk.Button(ocr_btns, text="Detect text", command=self._ocr_to_textbox).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
-        ttk.Button(ocr_btns, text="Export…", command=self._ocr_selected_cells).pack(side=tk.LEFT, expand=True, fill=tk.X)
-
-        ttk.Button(parent, text="Settings…", command=self._open_settings_window).pack(fill=tk.X, pady=2)
-
-        # Apply tool bindings now that canvas exists
-        # (canvas is created later; _apply_active_tool is safe to call once viewer is ready)
-
-    def _apply_active_tool(self):
-        """Bind mouse actions according to the active tool."""
-        if not hasattr(self, "canvas") or not hasattr(self, "viewer"):
-            return
-
-        tool = self.active_tool.get()
-
-        # Clear any previous special binds (except wheel, which viewer manages)
-        self.canvas.unbind("<Button-1>")
-        self.canvas.unbind("<B1-Motion>")
-        self.canvas.unbind("<ButtonRelease-1>")
-        self.canvas.unbind("<Button-3>")
-
-        if tool == "hand":
-            self.canvas.config(cursor="fleur")
-            self.viewer._bind_viewer_events()
-            self._set_ocr_panel_visible(False)
-            return
-
-        if tool == "zoom":
-            self.canvas.config(cursor="plus")
-            self._set_ocr_panel_visible(False)
-
-            def zoom_in_click(event):
-                self.viewer.zoom_in()
-
-            def zoom_out_click(event):
-                self.viewer.zoom_out()
-
-            # Left click zooms in, right click zooms out
-            self.canvas.bind("<Button-1>", lambda e: zoom_in_click(e))
-            self.canvas.bind("<Button-3>", lambda e: zoom_out_click(e))
-            # Keep wheel zoom from viewer
-            self.canvas.bind("<MouseWheel>", self.viewer.on_wheel)
-            self.canvas.bind("<Button-4>", self.viewer.on_wheel)
-            self.canvas.bind("<Button-5>", self.viewer.on_wheel)
-            return
-
-        if tool == "cell_select":
-            if not self._current_page_has_table():
-                messagebox.showwarning("OCR", "Run Edit → Detect table first, then use Cell Select (OCR).")
-                self.active_tool.set("hand")
-                self._apply_active_tool()
-                return
-
-            self.canvas.config(cursor="tcross")
-            self._set_ocr_panel_visible(True)
-
-            def pick(event):
-                self._toggle_cell_at_canvas_xy(event.x, event.y)
-
-            def show_menu(event):
-                self._show_ocr_context_menu(event.x_root, event.y_root)
-
-            self.canvas.bind("<Button-1>", pick)
-            self.canvas.bind("<Button-3>", show_menu)
-            self.canvas.bind("<MouseWheel>", self.viewer.on_wheel)
-            self.canvas.bind("<Button-4>", self.viewer.on_wheel)
-            self.canvas.bind("<Button-5>", self.viewer.on_wheel)
-            return
-
-        self._set_ocr_panel_visible(False)
-
-    def _set_ocr_panel_visible(self, visible: bool):
-        if not hasattr(self, "_ocr_panel") or self._ocr_panel is None:
-            return
-        if visible:
-            if not self._ocr_panel.winfo_ismapped():
-                self._ocr_panel.pack(fill=tk.BOTH, expand=False)
-        else:
-            if self._ocr_panel.winfo_ismapped():
-                self._ocr_panel.pack_forget()
-
-    def _show_ocr_context_menu(self, x_root: int, y_root: int):
-        """Context menu for OCR actions (only meaningful in Cell Select mode)."""
-        if not self._current_page_has_table():
-            return
-        menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="Detect text (to box)", command=self._ocr_to_textbox)
-        menu.add_command(label="Export OCR result…", command=self._ocr_selected_cells)
-        try:
-            menu.tk_popup(x_root, y_root)
-        finally:
-            menu.grab_release()
+        ttk.Button(parent, text="Settings…", command=self._open_settings_window).pack(fill=tk.X, pady=(8, 0))
 
     def _current_page_has_table(self) -> bool:
         """True when current page has both table line and cell masks computed."""
@@ -1044,6 +881,57 @@ class ImageManagementUI:
             editor.selected_cell_indices.add(best_idx)
         self._display_current_image()
         return
+
+    def _on_canvas_right_click(self, event):
+        """Right click on canvas: if on a cell, show menu to select/deselect + OCR actions."""
+        if not self._current_page_has_table():
+            return
+
+        editor = self._ensure_editor(self.current_index)
+        self._ensure_cell_boxes(editor)
+        if not editor.table_cell_boxes:
+            return
+
+        # Determine which cell is under cursor (smallest containing box)
+        p = self._canvas_to_image_xy(event.x, event.y)
+        if p is None:
+            return
+        ix, iy = int(p[0]), int(p[1])
+
+        best_idx: Optional[int] = None
+        best_area: Optional[int] = None
+        for i, (l, t, r, b) in enumerate(editor.table_cell_boxes):
+            if l <= ix < r and t <= iy < b:
+                area = max(1, (r - l) * (b - t))
+                if best_area is None or area < best_area:
+                    best_area = area
+                    best_idx = i
+
+        if best_idx is None:
+            return
+
+        menu = tk.Menu(self.root, tearoff=0)
+        if best_idx in editor.selected_cell_indices:
+            menu.add_command(label="Unselect cell", command=lambda: self._toggle_cell_at_canvas_xy(event.x, event.y))
+        else:
+            menu.add_command(label="Select cell", command=lambda: self._toggle_cell_at_canvas_xy(event.x, event.y))
+        menu.add_command(label="Clear cell selection", command=self._clear_cell_selection)
+        menu.add_separator()
+        menu.add_command(label="Detect text (to box)", command=self._ocr_to_textbox)
+        menu.add_command(label="Export OCR result…", command=self._ocr_selected_cells)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _clear_cell_selection(self):
+        if self.current_index < 0 or self.current_index >= len(self.processed_images):
+            return
+        editor = self.image_editors.get(self.current_index)
+        if editor is None:
+            return
+        editor.selected_cell_indices = set()
+        self._display_current_image()
 
     def _ensure_editor(self, idx: int) -> ImageEditor:
         if idx not in self.image_editors:
@@ -2330,13 +2218,8 @@ class ImageManagementUI:
         # No other edit features except rotate
 
     def _set_tool(self, tool: str):
-        if hasattr(self, "active_tool"):
-            # If Space-hand override is active, remember the intended tool but keep Hand until release.
-            if getattr(self, "_space_hand_active", False):
-                self._space_prev_tool = tool
-                return
-            self.active_tool.set(tool)
-            self._apply_active_tool()
+        # Tool palette removed (fused interactions). Kept as no-op for compatibility.
+        return
 
 
 def main():
