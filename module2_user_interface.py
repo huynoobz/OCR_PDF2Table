@@ -543,7 +543,11 @@ class ImageManagementUI:
         self.image_editors: Dict[int, ImageEditor] = {}
 
         # Settings / shortcuts
-        self.settings_path = os.path.join(os.path.dirname(__file__), "ui_settings.json")
+        # NOTE: When frozen into a onefile EXE, __file__ lives in a temp folder and is not writable.
+        # Store settings in a writable location (portable next to exe if possible; otherwise AppData).
+        from runtime_paths import user_data_dir
+
+        self.settings_path = str(user_data_dir() / "ui_settings.json")
         self.settings = self._load_settings()
         self._settings_window: Optional[tk.Toplevel] = None
         self._shortcut_bind_ids: Dict[str, str] = {}

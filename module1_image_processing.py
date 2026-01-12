@@ -11,6 +11,8 @@ from typing import List, Dict, Optional, Tuple, Any
 import cv2
 from dataclasses import dataclass, field
 
+from runtime_paths import find_vendor_poppler_bin
+
 @dataclass
 class ImageMetadata:
     """Metadata for a processed image."""
@@ -78,7 +80,12 @@ class PDFImageProcessor:
             crop_boxes = {}
         
         # Convert PDF pages to images
-        pil_images = convert_from_path(pdf_path, dpi=dpi)
+        # pdf2image on Windows typically needs Poppler. If shipped in vendor/, auto-detect it.
+        poppler_bin = find_vendor_poppler_bin()
+        if poppler_bin:
+            pil_images = convert_from_path(pdf_path, dpi=dpi, poppler_path=poppler_bin)
+        else:
+            pil_images = convert_from_path(pdf_path, dpi=dpi)
         
         processed_images = []
         

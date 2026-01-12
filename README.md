@@ -21,6 +21,37 @@ pip install -r requirements.txt
 - Linux: `sudo apt-get install poppler-utils`
 - macOS: `brew install poppler`
 
+**Note:** For OCR (`pytesseract`), you must install **Tesseract OCR**:
+- Windows: install via the official installer or a trusted distribution, then ensure `tesseract.exe` is on PATH
+- Linux: `sudo apt-get install tesseract-ocr`
+- macOS: `brew install tesseract`
+
+## Build a single-file EXE (Windows)
+
+This project can be packaged into **one** `OCR_PDF2Table.exe` using PyInstaller.
+
+1. In PowerShell, from the project folder, run:
+
+```powershell
+.\build_exe.ps1
+```
+
+2. Output:
+- `dist\OCR_PDF2Table.exe`
+
+### Optional: bundle Poppler/Tesseract next to the EXE (portable)
+
+If you want the EXE to work on another PC without installing Poppler/Tesseract globally,
+place them next to the EXE in a `vendor\` folder:
+
+- **Poppler**:
+  - `vendor\poppler\bin\...`  (or `vendor\poppler\Library\bin\...`)
+- **Tesseract**:
+  - `vendor\tesseract\tesseract.exe`
+  - `vendor\tesseract\tessdata\...`
+
+The app auto-detects these paths at runtime.
+
 ## Usage
 
 ```python

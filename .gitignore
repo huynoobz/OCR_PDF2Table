@@ -39,6 +39,7 @@ Thumbs.db
 
 # Project specific
 *.pdf
+*.csv
 output/
 exports/
 auto_test_output/
@@ -49,3 +50,4 @@ ui_settings.json
 *.bmp
 *.tiff
 git_commit_rule.txt
+vendor/

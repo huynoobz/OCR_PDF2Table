@@ -15,6 +15,8 @@ from typing import Optional
 
 from PIL import Image
 
+from runtime_paths import find_vendor_tesseract_exe
+
 
 @dataclass
 class OCRConfig:
@@ -36,6 +38,23 @@ def ocr_image_pil(pil_image: Image.Image, *, config: OCRConfig) -> str:
         import pytesseract  # type: ignore
     except Exception as e:
         raise RuntimeError("pytesseract is not installed. Run `pip install pytesseract`.") from e
+
+    # If Tesseract is bundled alongside the app, point pytesseract to it.
+    # Otherwise, rely on system installation / PATH.
+    tesseract_exe, tessdata_dir = find_vendor_tesseract_exe()
+    if tesseract_exe:
+        try:
+            pytesseract.pytesseract.tesseract_cmd = tesseract_exe
+        except Exception:
+            pass
+    if tessdata_dir:
+        # Some Tesseract builds need TESSDATA_PREFIX set to find language files.
+        try:
+            import os
+
+            os.environ.setdefault("TESSDATA_PREFIX", tessdata_dir)
+        except Exception:
+            pass
 
     cfg = f"--psm {int(config.psm)}"
     if config.oem is not None:
