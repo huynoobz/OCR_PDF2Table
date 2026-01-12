@@ -1275,6 +1275,14 @@ class ImageManagementUI:
         if s.startswith("<") and s.endswith(">"):
             return s
 
+        # Special-case "++" (common way users write Ctrl++). In Tk, the keysym is "plus".
+        # Example: "Ctrl++" -> "Ctrl+Plus"
+        if s.endswith("++"):
+            s = s[:-1] + "Plus"
+        # Also allow "Ctrl+" as shorthand
+        if s.endswith("+"):
+            s = s + "Plus"
+
         parts = [p.strip() for p in s.split("+") if p.strip()]
         if not parts:
             return None
@@ -1307,12 +1315,9 @@ class ImageManagementUI:
             ",": "comma",
             ".": "period",
             "+": "plus",
+            "plus": "plus",
             "-": "minus",
         }
-
-        # Handle Ctrl++ specifically (key part becomes empty with split); allow "Ctrl++" by detecting trailing plus
-        if s.endswith("++") and (len(parts) >= 2) and parts[-1] == "":
-            key = "+"
 
         key = key_map.get(key.lower(), key)
         if len(key) == 1:
@@ -1359,7 +1364,12 @@ class ImageManagementUI:
                 handler()
                 return "break" if break_default else None
 
-            self.root.bind_all(seq, _wrapped)
+            try:
+                self.root.bind_all(seq, _wrapped)
+            except tk.TclError as e:
+                # Don't prevent app startup due to a bad shortcut string.
+                print(f"[WARN] Failed to bind shortcut {action_id}='{friendly}' -> {seq}: {e}")
+                return
             self._shortcut_bind_ids[action_id] = seq
 
         # Actions
