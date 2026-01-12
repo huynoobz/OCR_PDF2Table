@@ -9,6 +9,7 @@ from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk, ImageEnhance
 from typing import List, Optional, Dict
 import os
+import re
 from module1_image_processing import ProcessedImage, PDFImageProcessor
 
 
@@ -245,11 +246,20 @@ class ImageManagementUI:
     
     def _create_ui(self):
         """Create the user interface."""
+        # Root grid: toolbar (row 0) + main content (row 1)
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=0)
+        self.root.rowconfigure(1, weight=1)
+
+        # Top toolbar with grouped dropdowns
+        toolbar = ttk.Frame(self.root, padding="4")
+        toolbar.grid(row=0, column=0, sticky=(tk.W, tk.E))
+        toolbar.columnconfigure(0, weight=1)
+        self._create_toolbar(toolbar)
+
         # Main container
         main_frame = ttk.Frame(self.root, padding="5")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
+        main_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Left panel - Image list
         left_panel = ttk.Frame(main_frame, width=200)
@@ -274,6 +284,28 @@ class ImageManagementUI:
         
         self.image_listbox.bind('<<ListboxSelect>>', self._on_listbox_select)
         self.image_listbox.bind('<Double-Button-1>', self._on_listbox_double_click)
+
+        # Selection wizard (multi-select helpers)
+        select_frame = ttk.LabelFrame(left_panel, text="Select (multi)", padding="6")
+        select_frame.pack(fill=tk.X, pady=(6, 0))
+
+        ttk.Label(select_frame, text="Pattern:").pack(anchor=tk.W)
+        self.select_pattern_var = tk.StringVar(value="")
+        pattern_entry = ttk.Entry(select_frame, textvariable=self.select_pattern_var)
+        pattern_entry.pack(fill=tk.X, pady=(2, 4))
+        pattern_entry.bind("<Return>", lambda _e: self._apply_selection_pattern())
+
+        sel_btn_row1 = ttk.Frame(select_frame)
+        sel_btn_row1.pack(fill=tk.X)
+        ttk.Button(sel_btn_row1, text="Apply", command=self._apply_selection_pattern).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        ttk.Button(sel_btn_row1, text="All", command=self._select_all).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        ttk.Button(sel_btn_row1, text="None", command=self._select_none).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+
+        sel_btn_row2 = ttk.Frame(select_frame)
+        sel_btn_row2.pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(sel_btn_row2, text="Odd", command=self._select_odd).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        ttk.Button(sel_btn_row2, text="Even", command=self._select_even).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        ttk.Button(sel_btn_row2, text="Invert", command=self._select_invert).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
         
         # Image management buttons
         btn_frame = ttk.Frame(left_panel)
@@ -380,6 +412,149 @@ class ImageManagementUI:
         self._update_listbox()
         if processed_images:
             self._display_current_image()
+
+    # ----------------------------
+    # Toolbar / Menus
+    # ----------------------------
+    def _create_toolbar(self, parent: ttk.Frame):
+        """Create a top toolbar with grouped dropdown menus."""
+        # File menu
+        file_btn = ttk.Menubutton(parent, text="File")
+        file_menu = tk.Menu(file_btn, tearoff=0)
+        file_menu.add_command(label="Open PDF…", command=self._load_from_module1)
+        file_menu.add_command(label="Add External Image…", command=self._add_external_image)
+        file_menu.add_separator()
+        file_menu.add_command(label="Export Selected…", command=self._export_selected)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.root.destroy)
+        file_btn["menu"] = file_menu
+        file_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        # Edit menu
+        edit_btn = ttk.Menubutton(parent, text="Edit")
+        edit_menu = tk.Menu(edit_btn, tearoff=0)
+        edit_menu.add_command(label="Rotate -90°", command=lambda: self._rotate(-90))
+        edit_menu.add_command(label="Rotate +90°", command=lambda: self._rotate(90))
+        edit_menu.add_command(label="Rotate 180°", command=lambda: self._rotate(180))
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Reset operations", command=self._reset_operations)
+        edit_menu.add_command(label="Clear crop", command=self._clear_crop)
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Delete selected", command=self._delete_selected)
+        edit_btn["menu"] = edit_menu
+        edit_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        # Select menu
+        select_btn = ttk.Menubutton(parent, text="Select")
+        select_menu = tk.Menu(select_btn, tearoff=0)
+        select_menu.add_command(label="All", command=self._select_all)
+        select_menu.add_command(label="None", command=self._select_none)
+        select_menu.add_command(label="Invert", command=self._select_invert)
+        select_menu.add_separator()
+        select_menu.add_command(label="Odd pages (1,3,5,...)", command=self._select_odd)
+        select_menu.add_command(label="Even pages (2,4,6,...)", command=self._select_even)
+        select_btn["menu"] = select_menu
+        select_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        # Quick hint
+        ttk.Label(
+            parent,
+            text="Tip: multi-select + edit applies to all selected. Pattern examples: 1-2, 1,3,5",
+        ).pack(side=tk.LEFT, padx=8)
+
+    # ----------------------------
+    # Selection helpers
+    # ----------------------------
+    def _get_selected_indices_or_current(self) -> List[int]:
+        """Return selected indices; if none, return [current_index] if valid."""
+        selected = list(self.image_listbox.curselection())
+        if selected:
+            return selected
+        if 0 <= self.current_index < len(self.processed_images):
+            return [self.current_index]
+        return []
+
+    def _apply_selection_indices(self, indices: List[int]):
+        """Apply a set of indices to the listbox selection."""
+        self.image_listbox.selection_clear(0, tk.END)
+        for i in sorted(set(indices)):
+            if 0 <= i < len(self.processed_images):
+                self.image_listbox.selection_set(i)
+        if indices:
+            first = sorted(set(indices))[0]
+            self.image_listbox.see(first)
+            # Keep a stable "current" page for viewing
+            self.current_index = first
+            self._display_current_image()
+
+    def _select_all(self):
+        self._apply_selection_indices(list(range(len(self.processed_images))))
+
+    def _select_none(self):
+        self.image_listbox.selection_clear(0, tk.END)
+
+    def _select_invert(self):
+        current = set(self.image_listbox.curselection())
+        all_idx = set(range(len(self.processed_images)))
+        self._apply_selection_indices(sorted(all_idx - current))
+
+    def _select_odd(self):
+        # odd page numbers => indices 0,2,4,...
+        self._apply_selection_indices([i for i in range(len(self.processed_images)) if (i + 1) % 2 == 1])
+
+    def _select_even(self):
+        # even page numbers => indices 1,3,5,...
+        self._apply_selection_indices([i for i in range(len(self.processed_images)) if (i + 1) % 2 == 0])
+
+    def _parse_selection_pattern(self, pattern: str) -> List[int]:
+        """
+        Parse selection patterns:
+        - "1-2" selects page 1..2
+        - "1,3,5" selects pages 1,3,5
+        - You can mix: "1-3,8,10-12"
+
+        Returns 0-based indices.
+        """
+        pattern = (pattern or "").strip()
+        if not pattern:
+            return []
+
+        max_page = len(self.processed_images)
+        selected: set[int] = set()
+
+        # Split on commas
+        parts = [p.strip() for p in pattern.split(",") if p.strip()]
+        for part in parts:
+            # Range
+            if "-" in part:
+                m = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", part)
+                if not m:
+                    raise ValueError(f"Invalid range: '{part}'")
+                a = int(m.group(1))
+                b = int(m.group(2))
+                if a > b:
+                    a, b = b, a
+                for page in range(a, b + 1):
+                    if 1 <= page <= max_page:
+                        selected.add(page - 1)
+            else:
+                if not re.fullmatch(r"\d+", part):
+                    raise ValueError(f"Invalid page number: '{part}'")
+                page = int(part)
+                if 1 <= page <= max_page:
+                    selected.add(page - 1)
+
+        return sorted(selected)
+
+    def _apply_selection_pattern(self):
+        try:
+            indices = self._parse_selection_pattern(self.select_pattern_var.get())
+            if not indices:
+                messagebox.showwarning("Select", "No pages matched the pattern.")
+                return
+            self._apply_selection_indices(indices)
+        except Exception as e:
+            messagebox.showerror("Select", str(e))
     
     def _load_from_module1(self):
         """Load images by processing a PDF file."""
@@ -535,7 +710,10 @@ class ImageManagementUI:
         """Handle listbox selection."""
         selected = self.image_listbox.curselection()
         if selected:
-            self.current_index = selected[0]
+            # Keep current_index stable when multi-selecting; if current is not
+            # in selection, move it to the first selected.
+            if self.current_index not in selected:
+                self.current_index = selected[0]
             self._display_current_image()
     
     def _on_listbox_double_click(self, event):
@@ -602,33 +780,37 @@ class ImageManagementUI:
     
     def _rotate(self, angle: float):
         """Rotate current image."""
-        if self.current_index < 0 or self.current_index >= len(self.processed_images):
+        targets = self._get_selected_indices_or_current()
+        if not targets:
             return
-        
-        if self.current_index not in self.image_editors:
-            processed = self.processed_images[self.current_index]
-            editor = ImageEditor()
-            editor.set_image(processed.pil_image)
-            self.image_editors[self.current_index] = editor
-        
-        editor = self.image_editors[self.current_index]
-        editor.rotate(angle)
-        self.viewer.set_image(editor.get_current_image())
+
+        for idx in targets:
+            if idx not in self.image_editors:
+                processed = self.processed_images[idx]
+                editor = ImageEditor()
+                editor.set_image(processed.pil_image)
+                self.image_editors[idx] = editor
+            self.image_editors[idx].rotate(angle)
+
+        # Refresh display for the current page
+        self._display_current_image()
     
     def _on_brightness_change(self, value):
         """Handle brightness slider change."""
-        if self.current_index < 0 or self.current_index >= len(self.processed_images):
+        targets = self._get_selected_indices_or_current()
+        if not targets:
             return
-        
-        if self.current_index not in self.image_editors:
-            processed = self.processed_images[self.current_index]
-            editor = ImageEditor()
-            editor.set_image(processed.pil_image)
-            self.image_editors[self.current_index] = editor
-        
-        editor = self.image_editors[self.current_index]
-        editor.set_brightness(float(value))
-        self.viewer.set_image(editor.get_current_image())
+
+        factor = float(value)
+        for idx in targets:
+            if idx not in self.image_editors:
+                processed = self.processed_images[idx]
+                editor = ImageEditor()
+                editor.set_image(processed.pil_image)
+                self.image_editors[idx] = editor
+            self.image_editors[idx].set_brightness(factor)
+
+        self._display_current_image()
         self._update_brightness_label()
     
     def _update_brightness_label(self):
@@ -637,18 +819,20 @@ class ImageManagementUI:
     
     def _on_contrast_change(self, value):
         """Handle contrast slider change."""
-        if self.current_index < 0 or self.current_index >= len(self.processed_images):
+        targets = self._get_selected_indices_or_current()
+        if not targets:
             return
-        
-        if self.current_index not in self.image_editors:
-            processed = self.processed_images[self.current_index]
-            editor = ImageEditor()
-            editor.set_image(processed.pil_image)
-            self.image_editors[self.current_index] = editor
-        
-        editor = self.image_editors[self.current_index]
-        editor.set_contrast(float(value))
-        self.viewer.set_image(editor.get_current_image())
+
+        factor = float(value)
+        for idx in targets:
+            if idx not in self.image_editors:
+                processed = self.processed_images[idx]
+                editor = ImageEditor()
+                editor.set_image(processed.pil_image)
+                self.image_editors[idx] = editor
+            self.image_editors[idx].set_contrast(factor)
+
+        self._display_current_image()
         self._update_contrast_label()
     
     def _update_contrast_label(self):
@@ -657,17 +841,22 @@ class ImageManagementUI:
     
     def _reset_operations(self):
         """Reset all operations on current image."""
-        if self.current_index < 0 or self.current_index >= len(self.processed_images):
+        targets = self._get_selected_indices_or_current()
+        if not targets:
             return
-        
-        if self.current_index in self.image_editors:
-            editor = self.image_editors[self.current_index]
-            editor.reset()
-            self.viewer.set_image(editor.get_current_image())
-            self.brightness_var.set(1.0)
-            self.contrast_var.set(1.0)
-            self._update_brightness_label()
-            self._update_contrast_label()
+
+        for idx in targets:
+            if idx in self.image_editors:
+                self.image_editors[idx].reset()
+            else:
+                # If no editor exists yet, nothing to reset.
+                pass
+
+        self.brightness_var.set(1.0)
+        self.contrast_var.set(1.0)
+        self._display_current_image()
+        self._update_brightness_label()
+        self._update_contrast_label()
     
     def _start_crop(self):
         """Start crop selection mode."""
@@ -730,17 +919,50 @@ class ImageManagementUI:
                 rel_y2 = (y2 - img_center_y) / viewer_scale
                 
                 # Convert to absolute image coordinates
-                left = max(0, int(img_w // 2 + rel_x1))
-                top = max(0, int(img_h // 2 + rel_y1))
-                right = min(img_w, int(img_w // 2 + rel_x2))
-                bottom = min(img_h, int(img_h // 2 + rel_y2))
-                
+                x_left = int(img_w // 2 + rel_x1)
+                y_top = int(img_h // 2 + rel_y1)
+                x_right = int(img_w // 2 + rel_x2)
+                y_bottom = int(img_h // 2 + rel_y2)
+
+                # Normalize drag direction + clamp
+                left = max(0, min(img_w, min(x_left, x_right)))
+                right = max(0, min(img_w, max(x_left, x_right)))
+                top = max(0, min(img_h, min(y_top, y_bottom)))
+                bottom = max(0, min(img_h, max(y_top, y_bottom)))
+
                 # Ensure valid crop box
                 if right > left and bottom > top:
-                    crop_box = (left, top, right, bottom)
-                    editor = self.image_editors[self.current_index]
-                    editor.set_crop(crop_box)
-                    self.viewer.set_image(editor.get_current_image())
+                    # Apply to all selected (or current if none selected)
+                    targets = self._get_selected_indices_or_current()
+
+                    # Use normalized box so it can be applied across different image sizes
+                    fx1 = left / float(img_w)
+                    fx2 = right / float(img_w)
+                    fy1 = top / float(img_h)
+                    fy2 = bottom / float(img_h)
+
+                    for idx in targets:
+                        if idx not in self.image_editors:
+                            processed = self.processed_images[idx]
+                            editor_t = ImageEditor()
+                            editor_t.set_image(processed.pil_image)
+                            self.image_editors[idx] = editor_t
+                        editor = self.image_editors[idx]
+
+                        base = editor.get_current_image()
+                        if base is None:
+                            continue
+                        w2, h2 = base.size
+                        crop_box = (
+                            max(0, min(w2, int(fx1 * w2))),
+                            max(0, min(h2, int(fy1 * h2))),
+                            max(0, min(w2, int(fx2 * w2))),
+                            max(0, min(h2, int(fy2 * h2))),
+                        )
+                        if crop_box[2] > crop_box[0] and crop_box[3] > crop_box[1]:
+                            editor.set_crop(crop_box)
+
+                    self._display_current_image()
         
         # Clean up
         self.crop_mode = False
@@ -757,10 +979,15 @@ class ImageManagementUI:
     
     def _clear_crop(self):
         """Clear crop on current image."""
-        if self.current_index >= 0 and self.current_index in self.image_editors:
-            editor = self.image_editors[self.current_index]
-            editor.set_crop(None)
-            self.viewer.set_image(editor.get_current_image())
+        targets = self._get_selected_indices_or_current()
+        if not targets:
+            return
+
+        for idx in targets:
+            if idx in self.image_editors:
+                self.image_editors[idx].set_crop(None)
+
+        self._display_current_image()
 
 
 def main():
