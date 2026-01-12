@@ -12,6 +12,7 @@ import os
 import re
 import json
 from dataclasses import dataclass, asdict
+from PIL import ImageDraw
 from module1_image_processing import ProcessedImage, PDFImageProcessor
 
 
@@ -164,20 +165,28 @@ class ImageEditor:
     
     def __init__(self):
         self.original_image: Optional[Image.Image] = None
+        self._base_image: Optional[Image.Image] = None  # after transforms, before paint overlay
         self.current_image: Optional[Image.Image] = None
         self.rotation = 0.0
         self.brightness = 1.0
         self.contrast = 1.0
         self.crop_box: Optional[tuple] = None
+
+        # Paint overlay (non-destructive)
+        self.paint_layer: Optional[Image.Image] = None  # RGBA, same size as _base_image
+        self.brush_color = (255, 0, 0)  # RGB
+        self.brush_size = 10
     
     def set_image(self, pil_image: Image.Image):
         """Set the base image."""
         self.original_image = pil_image.copy()
         self.current_image = pil_image.copy()
+        self._base_image = pil_image.copy()
         self.rotation = 0.0
         self.brightness = 1.0
         self.contrast = 1.0
         self.crop_box = None
+        self.paint_layer = None
     
     def rotate(self, angle: float):
         """Rotate image (non-destructive)."""
@@ -226,8 +235,46 @@ class ImageEditor:
         if self.contrast != 1.0:
             enhancer = ImageEnhance.Contrast(img)
             img = enhancer.enhance(self.contrast)
-        
+
+        # Store base image (after transforms/color, before paint)
+        self._base_image = img
+
+        # Composite paint layer (if any)
+        if self.paint_layer is not None:
+            if self.paint_layer.size != img.size:
+                # Transform size changed; discard paint layer (safe default)
+                self.paint_layer = None
+            else:
+                base_rgba = img.convert("RGBA")
+                img = Image.alpha_composite(base_rgba, self.paint_layer).convert("RGB")
+
         self.current_image = img
+
+    def get_base_image(self) -> Optional[Image.Image]:
+        """Get current base image (after transforms, before paint overlay)."""
+        return self._base_image
+
+    def _ensure_paint_layer(self):
+        if self._base_image is None:
+            return
+        if self.paint_layer is None or self.paint_layer.size != self._base_image.size:
+            self.paint_layer = Image.new("RGBA", self._base_image.size, (0, 0, 0, 0))
+
+    def paint_line(self, p1: tuple[float, float], p2: tuple[float, float]):
+        """Draw a brush line segment on the paint layer."""
+        self._ensure_paint_layer()
+        if self.paint_layer is None:
+            return
+        draw = ImageDraw.Draw(self.paint_layer)
+        rgba = (int(self.brush_color[0]), int(self.brush_color[1]), int(self.brush_color[2]), 255)
+        draw.line([p1, p2], fill=rgba, width=int(self.brush_size))
+        # Refresh current image composition
+        self._apply_all_operations()
+
+    def clear_paint(self):
+        """Clear painted strokes."""
+        self.paint_layer = None
+        self._apply_all_operations()
     
     def get_current_image(self) -> Optional[Image.Image]:
         """Get the current edited image."""
@@ -447,16 +494,26 @@ class ImageManagementUI:
         tool_btn("Hand (Pan)", "hand")
         tool_btn("Zoom", "zoom")
         tool_btn("Crop", "crop")
+        tool_btn("Brush", "brush")
+        tool_btn("Eyedropper", "eyedropper")
 
         ttk.Separator(parent).pack(fill=tk.X, pady=8)
 
-        # Placeholders for future tools
-        ttk.Button(parent, text="Brush (todo)", command=lambda: messagebox.showinfo("Tool", "Brush: not implemented yet")).pack(
-            fill=tk.X, pady=2
-        )
-        ttk.Button(parent, text="Eyedropper (todo)", command=lambda: messagebox.showinfo("Tool", "Eyedropper: not implemented yet")).pack(
-            fill=tk.X, pady=2
-        )
+        # Brush controls
+        ttk.Label(parent, text="Brush size").pack(anchor=tk.W)
+        self.brush_size_var = tk.IntVar(value=10)
+        ttk.Scale(
+            parent,
+            from_=1,
+            to=50,
+            orient=tk.HORIZONTAL,
+            command=lambda v: self._set_brush_size(int(float(v))),
+        ).pack(fill=tk.X, pady=(2, 6))
+
+        ttk.Label(parent, text="Brush color").pack(anchor=tk.W)
+        self._brush_color_preview = tk.Label(parent, text="      ", bg="#ff0000", relief=tk.SOLID, bd=1)
+        self._brush_color_preview.pack(anchor=tk.W, pady=(2, 4))
+        ttk.Button(parent, text="Clear paint", command=self._clear_paint_selected).pack(fill=tk.X, pady=(2, 0))
 
         ttk.Separator(parent).pack(fill=tk.X, pady=8)
         ttk.Button(parent, text="Settings…", command=self._open_settings_window).pack(fill=tk.X, pady=2)
@@ -499,6 +556,47 @@ class ImageManagementUI:
             # Left click zooms in, right click zooms out
             self.canvas.bind("<Button-1>", lambda e: zoom_in_click(e))
             self.canvas.bind("<Button-3>", lambda e: zoom_out_click(e))
+            # Keep wheel zoom from viewer
+            self.canvas.bind("<MouseWheel>", self.viewer.on_wheel)
+            self.canvas.bind("<Button-4>", self.viewer.on_wheel)
+            self.canvas.bind("<Button-5>", self.viewer.on_wheel)
+            return
+
+        if tool == "eyedropper":
+            self.canvas.config(cursor="tcross")
+
+            def pick(event):
+                self._eyedropper_pick(event.x, event.y)
+
+            self.canvas.bind("<Button-1>", pick)
+            # Keep wheel zoom from viewer
+            self.canvas.bind("<MouseWheel>", self.viewer.on_wheel)
+            self.canvas.bind("<Button-4>", self.viewer.on_wheel)
+            self.canvas.bind("<Button-5>", self.viewer.on_wheel)
+            return
+
+        if tool == "brush":
+            self.canvas.config(cursor="pencil")
+            self._brush_last_pt = None
+
+            def start(event):
+                self._brush_last_pt = self._canvas_to_image_xy(event.x, event.y)
+
+            def move(event):
+                if self._brush_last_pt is None:
+                    return
+                p2 = self._canvas_to_image_xy(event.x, event.y)
+                if p2 is None:
+                    return
+                self._paint_line_on_selected(self._brush_last_pt, p2)
+                self._brush_last_pt = p2
+
+            def end(_event):
+                self._brush_last_pt = None
+
+            self.canvas.bind("<Button-1>", start)
+            self.canvas.bind("<B1-Motion>", move)
+            self.canvas.bind("<ButtonRelease-1>", end)
             # Keep wheel zoom from viewer
             self.canvas.bind("<MouseWheel>", self.viewer.on_wheel)
             self.canvas.bind("<Button-4>", self.viewer.on_wheel)
@@ -559,6 +657,95 @@ class ImageManagementUI:
         self._toolbar_hint_label.pack(side=tk.LEFT, padx=8)
 
     # ----------------------------
+    # Brush / Eyedropper helpers
+    # ----------------------------
+    def _set_brush_size(self, size: int):
+        size = max(1, min(200, int(size)))
+        if hasattr(self, "brush_size_var"):
+            self.brush_size_var.set(size)
+
+    def _update_brush_preview(self, rgb: tuple[int, int, int]):
+        if hasattr(self, "_brush_color_preview") and self._brush_color_preview is not None:
+            self._brush_color_preview.config(bg=f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}")
+
+    def _canvas_to_image_xy(self, canvas_x: float, canvas_y: float) -> Optional[tuple[float, float]]:
+        """Map canvas coordinates to current displayed image coordinates."""
+        if self.current_index < 0 or self.current_index >= len(self.processed_images):
+            return None
+        if self.current_index not in self.image_editors:
+            return None
+        img = self.image_editors[self.current_index].get_current_image()
+        if img is None:
+            return None
+
+        img_w, img_h = img.size
+        canvas_w = self.canvas.winfo_width()
+        canvas_h = self.canvas.winfo_height()
+        scale = float(self.viewer.scale) if self.viewer.scale else 1.0
+        center_x = canvas_w // 2 + int(self.viewer.offset_x)
+        center_y = canvas_h // 2 + int(self.viewer.offset_y)
+
+        ix = (img_w / 2.0) + ((canvas_x - center_x) / scale)
+        iy = (img_h / 2.0) + ((canvas_y - center_y) / scale)
+
+        ix = max(0.0, min(float(img_w - 1), ix))
+        iy = max(0.0, min(float(img_h - 1), iy))
+        return (ix, iy)
+
+    def _ensure_editor(self, idx: int) -> ImageEditor:
+        if idx not in self.image_editors:
+            processed = self.processed_images[idx]
+            editor = ImageEditor()
+            editor.set_image(processed.pil_image)
+            self.image_editors[idx] = editor
+        return self.image_editors[idx]
+
+    def _apply_brush_settings_to_editor(self, editor: ImageEditor):
+        if hasattr(self, "brush_size_var"):
+            editor.brush_size = int(self.brush_size_var.get())
+        # brush_color is already stored per editor; keep UI preview in sync elsewhere
+
+    def _paint_line_on_selected(self, p1: tuple[float, float], p2: tuple[float, float]):
+        targets = self._get_selected_indices_or_current()
+        if not targets:
+            return
+
+        for idx in targets:
+            editor = self._ensure_editor(idx)
+            self._apply_brush_settings_to_editor(editor)
+            editor.paint_line(p1, p2)
+
+        self._display_current_image()
+
+    def _eyedropper_pick(self, canvas_x: float, canvas_y: float):
+        p = self._canvas_to_image_xy(canvas_x, canvas_y)
+        if p is None:
+            return
+        ix, iy = p
+        editor = self._ensure_editor(self.current_index)
+        base = editor.get_base_image()
+        if base is None:
+            base = editor.get_current_image()
+        if base is None:
+            return
+        rgb = base.convert("RGB").getpixel((int(ix), int(iy)))
+        editor.brush_color = (int(rgb[0]), int(rgb[1]), int(rgb[2]))
+        self._update_brush_preview(editor.brush_color)
+        # Switch to brush automatically after picking a color (common UX)
+        if hasattr(self, "active_tool"):
+            self.active_tool.set("brush")
+            self._apply_active_tool()
+
+    def _clear_paint_selected(self):
+        targets = self._get_selected_indices_or_current()
+        if not targets:
+            return
+        for idx in targets:
+            if idx in self.image_editors:
+                self.image_editors[idx].clear_paint()
+        self._display_current_image()
+
+    # ----------------------------
     # Settings / Persistence
     # ----------------------------
     def _default_keymap(self) -> Dict[str, str]:
@@ -588,8 +775,17 @@ class ImageManagementUI:
             "rotate_180": "Ctrl+Shift+R",
             "reset_ops": "Ctrl+Alt+0",
             "delete_selected": "Delete",
+            # Tool shortcuts (Photoshop-like)
+            "tool_hand": "H",
+            "tool_zoom": "Z",
+            "tool_crop": "C",
+            "tool_brush": "B",
+            "tool_eyedropper": "I",
+
+            # Crop helpers
             "start_crop": "C",
             "clear_crop": "Shift+C",
+            "clear_paint": "Ctrl+Alt+Delete",
         }
 
     def _load_settings(self) -> UISettings:
@@ -695,6 +891,11 @@ class ImageManagementUI:
             ("export_selected", "Export Selected"),
             ("settings", "Settings (Tab)"),
             ("settings_alt", "Settings (Ctrl+,)"),
+            ("tool_hand", "Tool: Hand"),
+            ("tool_zoom", "Tool: Zoom"),
+            ("tool_crop", "Tool: Crop"),
+            ("tool_brush", "Tool: Brush"),
+            ("tool_eyedropper", "Tool: Eyedropper"),
             ("select_wizard", "Select Wizard"),
             ("select_all", "Select All"),
             ("select_none", "Select None (Deselect)"),
@@ -714,6 +915,7 @@ class ImageManagementUI:
             ("delete_selected", "Delete selected"),
             ("start_crop", "Start crop"),
             ("clear_crop", "Clear crop"),
+            ("clear_paint", "Clear paint"),
         ]
 
         grid = ttk.Frame(shortcuts)
@@ -1469,8 +1671,22 @@ class ImageManagementUI:
         bind("reset_ops", keymap.get("reset_ops", ""), self._reset_operations)
 
         bind("delete_selected", keymap.get("delete_selected", ""), self._delete_selected)
-        bind("start_crop", keymap.get("start_crop", ""), self._start_crop)
+        # Tool selection
+        bind("tool_hand", keymap.get("tool_hand", ""), lambda: self._set_tool("hand"))
+        bind("tool_zoom", keymap.get("tool_zoom", ""), lambda: self._set_tool("zoom"))
+        bind("tool_crop", keymap.get("tool_crop", ""), lambda: self._set_tool("crop"))
+        bind("tool_brush", keymap.get("tool_brush", ""), lambda: self._set_tool("brush"))
+        bind("tool_eyedropper", keymap.get("tool_eyedropper", ""), lambda: self._set_tool("eyedropper"))
+
+        # Legacy crop shortcut (kept for compatibility)
+        bind("start_crop", keymap.get("start_crop", ""), lambda: self._set_tool("crop"))
         bind("clear_crop", keymap.get("clear_crop", ""), self._clear_crop)
+        bind("clear_paint", keymap.get("clear_paint", ""), self._clear_paint_selected)
+
+    def _set_tool(self, tool: str):
+        if hasattr(self, "active_tool"):
+            self.active_tool.set(tool)
+            self._apply_active_tool()
 
 
 def main():
