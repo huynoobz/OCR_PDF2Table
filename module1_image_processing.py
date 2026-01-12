@@ -330,3 +330,82 @@ class PDFImageProcessor:
             pil_image=pil_processed,
             metadata=metadata
         )
+
+    @staticmethod
+    def detect_table_lines(
+        img_array: np.ndarray,
+        *,
+        adaptive_block_size: int = 15,
+        adaptive_c: int = 2,
+        horizontal_kernel_len: Optional[int] = None,
+        vertical_kernel_len: Optional[int] = None,
+        kernel_scale: int = 30,
+    ) -> np.ndarray:
+        """
+        Detect table grid lines and return a binary mask (uint8: 0/255).
+
+        Pipeline (as requested):
+        - Adaptive threshold (invert)
+        - Extract horizontal lines: horizontal kernel (1 x k) + morphological open
+        - Extract vertical lines: vertical kernel (k x 1) + morphological open
+        - Combine horizontal + vertical masks
+
+        Args:
+            img_array: Input image (grayscale or color). Values can be uint8 or convertible.
+            adaptive_block_size: Odd block size for adaptive threshold.
+            adaptive_c: Constant subtracted from mean in adaptive threshold.
+            horizontal_kernel_len: Kernel length for horizontal lines (pixels). If None, derived from width//kernel_scale.
+            vertical_kernel_len: Kernel length for vertical lines (pixels). If None, derived from height//kernel_scale.
+            kernel_scale: If kernel lengths are None, k = max(10, dimension//kernel_scale).
+
+        Returns:
+            mask: uint8 binary mask (0 background, 255 lines)
+        """
+        if img_array is None:
+            raise ValueError("img_array is None")
+
+        # Ensure grayscale uint8
+        if img_array.ndim == 3:
+            if img_array.shape[2] == 4:
+                gray = cv2.cvtColor(img_array, cv2.COLOR_RGBA2GRAY)
+            else:
+                gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = img_array.copy()
+
+        if gray.dtype != np.uint8:
+            gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+        # Ensure valid adaptive block size
+        adaptive_block_size = int(adaptive_block_size)
+        if adaptive_block_size < 3:
+            adaptive_block_size = 3
+        if adaptive_block_size % 2 == 0:
+            adaptive_block_size += 1
+
+        # Adaptive threshold (invert)
+        thresh = cv2.adaptiveThreshold(
+            gray,
+            255,
+            cv2.ADAPTIVE_THRESH_MEAN_C,
+            cv2.THRESH_BINARY_INV,
+            adaptive_block_size,
+            int(adaptive_c),
+        )
+
+        h, w = thresh.shape[:2]
+        if horizontal_kernel_len is None:
+            horizontal_kernel_len = max(10, w // max(1, int(kernel_scale)))
+        if vertical_kernel_len is None:
+            vertical_kernel_len = max(10, h // max(1, int(kernel_scale)))
+
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (int(horizontal_kernel_len), 1))
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, int(vertical_kernel_len)))
+
+        # Extract lines via morphological open
+        horizontal_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel, iterations=1)
+        vertical_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vertical_kernel, iterations=1)
+
+        # Combine
+        mask = cv2.bitwise_or(horizontal_lines, vertical_lines)
+        return mask

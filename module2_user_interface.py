@@ -13,6 +13,7 @@ import re
 import json
 from dataclasses import dataclass, asdict
 from PIL import ImageDraw
+import numpy as np
 from module1_image_processing import ProcessedImage, PDFImageProcessor
 
 
@@ -176,6 +177,9 @@ class ImageEditor:
         self.paint_layer: Optional[Image.Image] = None  # RGBA, same size as _base_image
         self.brush_color = (255, 0, 0)  # RGB
         self.brush_size = 10
+
+        # Table detection mask (binary mask as PIL 'L', 0/255), aligned to _base_image
+        self.table_mask: Optional[Image.Image] = None
     
     def set_image(self, pil_image: Image.Image):
         """Set the base image."""
@@ -187,6 +191,7 @@ class ImageEditor:
         self.contrast = 1.0
         self.crop_box = None
         self.paint_layer = None
+        self.table_mask = None
     
     def rotate(self, angle: float):
         """Rotate image (non-destructive)."""
@@ -239,6 +244,10 @@ class ImageEditor:
         # Store base image (after transforms/color, before paint)
         self._base_image = img
 
+        # Invalidate table mask if size changed
+        if self.table_mask is not None and self.table_mask.size != img.size:
+            self.table_mask = None
+
         # Composite paint layer (if any)
         if self.paint_layer is not None:
             if self.paint_layer.size != img.size:
@@ -275,6 +284,10 @@ class ImageEditor:
         """Clear painted strokes."""
         self.paint_layer = None
         self._apply_all_operations()
+
+    def set_table_mask(self, mask: Optional[Image.Image]):
+        """Set/clear the table mask (expects 'L' image 0/255, same size as base)."""
+        self.table_mask = mask
     
     def get_current_image(self) -> Optional[Image.Image]:
         """Get the current edited image."""
@@ -307,6 +320,7 @@ class ImageManagementUI:
         self._shortcut_bind_ids: Dict[str, str] = {}
         # Used by the Select Wizard dialog (menu); kept even if the left-panel wizard is hidden.
         self.select_pattern_var = tk.StringVar(value="")
+        self.show_table_mask_var = tk.BooleanVar(value=False)
         
         # Create UI
         self._create_ui()
@@ -628,8 +642,12 @@ class ImageManagementUI:
         edit_menu.add_command(label="Rotate +90°", command=lambda: self._rotate(90))
         edit_menu.add_command(label="Rotate 180°", command=lambda: self._rotate(180))
         edit_menu.add_separator()
+        edit_menu.add_command(label="Detect table lines", command=self._detect_table_selected)
+        edit_menu.add_checkbutton(label="Show table mask", onvalue=True, offvalue=False, variable=self.show_table_mask_var, command=self._refresh_view)
+        edit_menu.add_separator()
         edit_menu.add_command(label="Reset operations", command=self._reset_operations)
         edit_menu.add_command(label="Clear crop", command=self._clear_crop)
+        edit_menu.add_command(label="Clear table mask", command=self._clear_table_mask_selected)
         edit_menu.add_separator()
         edit_menu.add_command(label="Delete selected", command=self._delete_selected)
         edit_btn["menu"] = edit_menu
@@ -743,6 +761,43 @@ class ImageManagementUI:
         for idx in targets:
             if idx in self.image_editors:
                 self.image_editors[idx].clear_paint()
+        self._display_current_image()
+
+    # ----------------------------
+    # Table detection (mask)
+    # ----------------------------
+    def _detect_table_selected(self):
+        """Compute table line mask for all selected images (or current)."""
+        targets = self._get_selected_indices_or_current()
+        if not targets:
+            messagebox.showwarning("Detect table", "No images selected.")
+            return
+
+        for idx in targets:
+            editor = self._ensure_editor(idx)
+            base = editor.get_base_image()
+            if base is None:
+                base = editor.get_current_image()
+            if base is None:
+                continue
+
+            # Use Module 1 logic to compute mask
+            img_np = np.array(base.convert("RGB"))
+            mask = PDFImageProcessor.detect_table_lines(img_np)
+            mask_pil = Image.fromarray(mask, mode="L")
+            editor.set_table_mask(mask_pil)
+
+        # Auto-enable display
+        self.show_table_mask_var.set(True)
+        self._display_current_image()
+
+    def _clear_table_mask_selected(self):
+        targets = self._get_selected_indices_or_current()
+        if not targets:
+            return
+        for idx in targets:
+            if idx in self.image_editors:
+                self.image_editors[idx].set_table_mask(None)
         self._display_current_image()
 
     # ----------------------------
@@ -1289,9 +1344,14 @@ class ImageManagementUI:
         else:
             editor = self.image_editors[self.current_index]
         
-        # Display edited image
+        # Display edited image (+ optional table mask overlay)
         current_img = editor.get_current_image()
-        self.viewer.set_image(current_img)
+        if current_img is None:
+            return
+        display_img = current_img
+        if self.show_table_mask_var.get() and editor.table_mask is not None:
+            display_img = self._composite_table_mask(display_img, editor.table_mask)
+        self.viewer.set_image(display_img)
         
         # Update page label
         self.page_label.config(text=f"{self.current_index + 1} / {len(self.processed_images)}")
@@ -1314,6 +1374,28 @@ class ImageManagementUI:
         self.contrast_var.set(editor.contrast)
         self._update_brightness_label()
         self._update_contrast_label()
+
+    def _refresh_view(self):
+        """Refresh current viewer without changing selection."""
+        self._display_current_image()
+
+    def _composite_table_mask(self, base_img: Image.Image, mask_l: Image.Image) -> Image.Image:
+        """
+        Overlay the line mask in semi-transparent red.
+        mask_l is expected to be 'L' 0..255 same size as base.
+        """
+        if mask_l.mode != "L":
+            mask_l = mask_l.convert("L")
+        if mask_l.size != base_img.size:
+            # Can't overlay safely
+            return base_img
+        base_rgba = base_img.convert("RGBA")
+        # Create a red overlay where mask is present
+        overlay = Image.new("RGBA", base_img.size, (255, 0, 0, 0))
+        # Alpha = mask * 0.55
+        alpha = mask_l.point(lambda p: int(p * 0.55))
+        overlay.putalpha(alpha)
+        return Image.alpha_composite(base_rgba, overlay).convert("RGB")
     
     def _rotate(self, angle: float):
         """Rotate current image."""
