@@ -830,7 +830,7 @@ class ImageManagementUI:
         edit_menu.add_command(label="Rotate +90°", command=lambda: self._rotate(90))
         edit_menu.add_command(label="Rotate 180°", command=lambda: self._rotate(180))
         edit_menu.add_separator()
-        edit_menu.add_command(label="Detect table lines", command=self._detect_table_selected)
+        edit_menu.add_command(label="Detect table", command=self._detect_table)
         edit_menu.add_checkbutton(
             label="Show table lines mask",
             onvalue=True,
@@ -838,7 +838,7 @@ class ImageManagementUI:
             variable=self.show_table_mask_var,
             command=self._refresh_view,
         )
-        edit_menu.add_command(label="Detect table cells", command=self._detect_table_cells_selected)
+        # Cells are computed by Detect table; this toggle only controls display.
         edit_menu.add_checkbutton(
             label="Show table cells mask",
             onvalue=True,
@@ -936,7 +936,7 @@ class ImageManagementUI:
             return
         editor = self._ensure_editor(self.current_index)
         if editor.table_cells_mask is None:
-            messagebox.showwarning("OCR", "No cells mask detected. Run Edit → Detect table cells first.")
+            messagebox.showwarning("OCR", "No cells mask detected. Run Edit → Detect table first.")
             return
         self._ensure_cell_boxes(editor)
         if not editor.table_cell_boxes:
@@ -1039,8 +1039,8 @@ class ImageManagementUI:
     # ----------------------------
     # Table detection (mask overlays)
     # ----------------------------
-    def _detect_table_selected(self):
-        """Compute table line mask for all selected images (or current)."""
+    def _detect_table(self):
+        """Detect table lines + cells mask for all selected images (or current)."""
         targets = self._get_selected_indices_or_current()
         if not targets:
             messagebox.showwarning("Detect table", "No images selected.")
@@ -1054,33 +1054,14 @@ class ImageManagementUI:
             if base is None:
                 continue
             img_np = np.array(base.convert("RGB"))
-            mask = PDFImageProcessor.detect_table_lines(img_np)
-            editor.set_table_mask(Image.fromarray(mask, mode="L"))
+            line_mask = PDFImageProcessor.detect_table_lines(img_np)
+            editor.set_table_mask(Image.fromarray(line_mask, mode="L"))
 
-        self.show_table_mask_var.set(True)
-        self._display_current_image()
-
-    def _detect_table_cells_selected(self):
-        """Compute table cells mask for all selected images (or current)."""
-        targets = self._get_selected_indices_or_current()
-        if not targets:
-            messagebox.showwarning("Detect table", "No images selected.")
-            return
-
-        for idx in targets:
-            editor = self._ensure_editor(idx)
-            # Require line detection first and use stored line mask as boundaries.
-            if editor.table_mask is None:
-                messagebox.showwarning(
-                    "Detect table cells",
-                    "Please run 'Detect table lines' first (cells detection uses the line mask as separators).",
-                )
-                return
-
-            line_mask = np.array(editor.table_mask.convert("L"))
+            # Cells must be derived from line mask separators
             cells = PDFImageProcessor.detect_table_cells_mask_from_lines(line_mask)
             editor.set_table_cells_mask(Image.fromarray(cells, mode="L"))
 
+        self.show_table_mask_var.set(True)
         self.show_table_cells_var.set(True)
         self._display_current_image()
 
@@ -1715,7 +1696,7 @@ class ImageManagementUI:
             return None
         editor = self._ensure_editor(self.current_index)
         if editor.table_cells_mask is None:
-            messagebox.showwarning("OCR", "No cells mask. Run Edit → Detect table cells first.")
+            messagebox.showwarning("OCR", "No cells mask. Run Edit → Detect table first.")
             return None
         self._ensure_cell_boxes(editor)
         if not editor.selected_cell_indices:
