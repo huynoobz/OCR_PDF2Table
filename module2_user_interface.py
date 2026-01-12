@@ -258,6 +258,8 @@ class ImageManagementUI:
         self.settings = self._load_settings()
         self._settings_window: Optional[tk.Toplevel] = None
         self._shortcut_bind_ids: Dict[str, str] = {}
+        # Used by the Select Wizard dialog (menu); kept even if the left-panel wizard is hidden.
+        self.select_pattern_var = tk.StringVar(value="")
         
         # Create UI
         self._create_ui()
@@ -280,67 +282,52 @@ class ImageManagementUI:
         # Main container
         main_frame = ttk.Frame(self.root, padding="5")
         main_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
-        # Left panel - Image list
-        left_panel = ttk.Frame(main_frame, width=200)
-        left_panel.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 5))
-        main_frame.columnconfigure(1, weight=1)
+
+        # Layout: [Tools | Viewer+controls | Image list]
+        main_frame.columnconfigure(0, weight=0)  # tools
+        main_frame.columnconfigure(1, weight=1)  # viewer
+        main_frame.columnconfigure(2, weight=0)  # list
         main_frame.rowconfigure(0, weight=1)
-        
-        # Image list
-        list_label = ttk.Label(left_panel, text="Images")
+
+        # Left panel - Tools palette
+        tools_panel = ttk.Frame(main_frame, width=140)
+        tools_panel.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.W), padx=(0, 6))
+        self._create_tools_panel(tools_panel)
+
+        # Center panel - Image viewer and controls
+        right_panel = ttk.Frame(main_frame)
+        right_panel.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+        # Right panel - Image list
+        list_panel = ttk.Frame(main_frame, width=240)
+        list_panel.grid(row=0, column=2, sticky=(tk.N, tk.S, tk.E), padx=(6, 0))
+
+        list_label = ttk.Label(list_panel, text="Images")
         list_label.pack(fill=tk.X, pady=(0, 5))
-        
-        # Listbox with scrollbar
-        list_frame = ttk.Frame(left_panel)
+
+        list_frame = ttk.Frame(list_panel)
         list_frame.pack(fill=tk.BOTH, expand=True)
-        
+
         scrollbar = ttk.Scrollbar(list_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
+
         self.image_listbox = tk.Listbox(list_frame, selectmode=tk.EXTENDED, yscrollcommand=scrollbar.set)
         self.image_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.image_listbox.yview)
-        
-        self.image_listbox.bind('<<ListboxSelect>>', self._on_listbox_select)
-        self.image_listbox.bind('<Double-Button-1>', self._on_listbox_double_click)
 
-        # Selection wizard (multi-select helpers)
-        select_frame = ttk.LabelFrame(left_panel, text="Select (multi)", padding="6")
-        select_frame.pack(fill=tk.X, pady=(6, 0))
+        self.image_listbox.bind("<<ListboxSelect>>", self._on_listbox_select)
+        self.image_listbox.bind("<Double-Button-1>", self._on_listbox_double_click)
 
-        ttk.Label(select_frame, text="Pattern:").pack(anchor=tk.W)
-        self.select_pattern_var = tk.StringVar(value="")
-        pattern_entry = ttk.Entry(select_frame, textvariable=self.select_pattern_var)
-        pattern_entry.pack(fill=tk.X, pady=(2, 4))
-        pattern_entry.bind("<Return>", lambda _e: self._apply_selection_pattern())
+        # Image management buttons (move next to the list)
+        btn_frame = ttk.Frame(list_panel)
+        btn_frame.pack(fill=tk.X, pady=(6, 0))
 
-        sel_btn_row1 = ttk.Frame(select_frame)
-        sel_btn_row1.pack(fill=tk.X)
-        ttk.Button(sel_btn_row1, text="Apply", command=self._apply_selection_pattern).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
-        ttk.Button(sel_btn_row1, text="All", command=self._select_all).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        ttk.Button(sel_btn_row1, text="None", command=self._select_none).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
-
-        sel_btn_row2 = ttk.Frame(select_frame)
-        sel_btn_row2.pack(fill=tk.X, pady=(4, 0))
-        ttk.Button(sel_btn_row2, text="Odd", command=self._select_odd).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
-        ttk.Button(sel_btn_row2, text="Even", command=self._select_even).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        ttk.Button(sel_btn_row2, text="Invert", command=self._select_invert).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
-        
-        # Image management buttons
-        btn_frame = ttk.Frame(left_panel)
-        btn_frame.pack(fill=tk.X, pady=(5, 0))
-        
         ttk.Button(btn_frame, text="Load from Module 1", command=self._load_from_module1).pack(fill=tk.X, pady=2)
         ttk.Button(btn_frame, text="Add External", command=self._add_external_image).pack(fill=tk.X, pady=2)
         ttk.Button(btn_frame, text="Delete Selected", command=self._delete_selected).pack(fill=tk.X, pady=2)
         ttk.Button(btn_frame, text="Move Up", command=self._move_up).pack(fill=tk.X, pady=2)
         ttk.Button(btn_frame, text="Move Down", command=self._move_down).pack(fill=tk.X, pady=2)
         ttk.Button(btn_frame, text="Export Selected", command=self._export_selected).pack(fill=tk.X, pady=2)
-        
-        # Right panel - Image viewer and controls
-        right_panel = ttk.Frame(main_frame)
-        right_panel.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Viewer frame
         viewer_frame = ttk.Frame(right_panel)
@@ -354,6 +341,9 @@ class ImageManagementUI:
         self.canvas.pack(fill=tk.BOTH, expand=True)
         
         self.viewer = ImageViewer(self.canvas)
+        # Initialize tool bindings now that canvas/viewer exist
+        if hasattr(self, "active_tool"):
+            self._apply_active_tool()
         
         # Navigation controls
         nav_frame = ttk.Frame(viewer_frame)
@@ -434,6 +424,86 @@ class ImageManagementUI:
             self._display_current_image()
             if getattr(self.settings, "auto_fit_on_load", False):
                 self.viewer.fit_to_window()
+
+    # ----------------------------
+    # Tools palette
+    # ----------------------------
+    def _create_tools_panel(self, parent: ttk.Frame):
+        """Create a vertical tools palette (left side)."""
+        ttk.Label(parent, text="Tools").pack(anchor=tk.W, pady=(0, 6))
+
+        self.active_tool = tk.StringVar(value="hand")
+
+        def tool_btn(text: str, value: str):
+            b = ttk.Radiobutton(
+                parent,
+                text=text,
+                value=value,
+                variable=self.active_tool,
+                command=self._apply_active_tool,
+            )
+            b.pack(fill=tk.X, pady=2)
+
+        tool_btn("Hand (Pan)", "hand")
+        tool_btn("Zoom", "zoom")
+        tool_btn("Crop", "crop")
+
+        ttk.Separator(parent).pack(fill=tk.X, pady=8)
+
+        # Placeholders for future tools
+        ttk.Button(parent, text="Brush (todo)", command=lambda: messagebox.showinfo("Tool", "Brush: not implemented yet")).pack(
+            fill=tk.X, pady=2
+        )
+        ttk.Button(parent, text="Eyedropper (todo)", command=lambda: messagebox.showinfo("Tool", "Eyedropper: not implemented yet")).pack(
+            fill=tk.X, pady=2
+        )
+
+        ttk.Separator(parent).pack(fill=tk.X, pady=8)
+        ttk.Button(parent, text="Settings…", command=self._open_settings_window).pack(fill=tk.X, pady=2)
+
+        # Apply tool bindings now that canvas exists
+        # (canvas is created later; _apply_active_tool is safe to call once viewer is ready)
+
+    def _apply_active_tool(self):
+        """Bind mouse actions according to the active tool."""
+        if not hasattr(self, "canvas") or not hasattr(self, "viewer"):
+            return
+
+        tool = self.active_tool.get()
+
+        # Clear any previous special binds (except wheel, which viewer manages)
+        self.canvas.unbind("<Button-1>")
+        self.canvas.unbind("<B1-Motion>")
+        self.canvas.unbind("<ButtonRelease-1>")
+        self.canvas.unbind("<Button-3>")
+
+        if tool == "hand":
+            self.canvas.config(cursor="fleur")
+            self.viewer._bind_viewer_events()
+            return
+
+        if tool == "crop":
+            self.canvas.config(cursor="crosshair")
+            self._start_crop()
+            return
+
+        if tool == "zoom":
+            self.canvas.config(cursor="plus")
+
+            def zoom_in_click(event):
+                self.viewer.zoom_in()
+
+            def zoom_out_click(event):
+                self.viewer.zoom_out()
+
+            # Left click zooms in, right click zooms out
+            self.canvas.bind("<Button-1>", lambda e: zoom_in_click(e))
+            self.canvas.bind("<Button-3>", lambda e: zoom_out_click(e))
+            # Keep wheel zoom from viewer
+            self.canvas.bind("<MouseWheel>", self.viewer.on_wheel)
+            self.canvas.bind("<Button-4>", self.viewer.on_wheel)
+            self.canvas.bind("<Button-5>", self.viewer.on_wheel)
+            return
 
     # ----------------------------
     # Toolbar / Menus
