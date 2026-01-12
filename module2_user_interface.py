@@ -1085,7 +1085,15 @@ class ImageManagementUI:
 
     def _build_table_grid_boxes(self, boxes: List[tuple[int, int, int, int]]) -> List[List[Optional[tuple[int, int, int, int]]]]:
         """
-        Convert detected cell boxes into a (rows x cols) grid of boxes by clustering x/y centers.
+        Convert detected cell boxes into a (rows x cols) grid of boxes.
+
+        Previous approach used global clustering of x/y centers which can accidentally merge a real column
+        (especially when one column is narrow or slightly misaligned), causing exported CSV to miss a column.
+
+        New approach:
+        - Group boxes into rows by y-center (tolerant clustering)
+        - Pick the "widest" row as a template for column centers
+        - Assign each row's boxes to nearest column center (with tolerance)
         Missing cells are None.
         """
         if not boxes:
@@ -1095,44 +1103,80 @@ class ImageManagementUI:
         heights = [(_b - _t) for (_l, _t, _r, _b) in boxes]
         med_w = self._median_int(widths, 50)
         med_h = self._median_int(heights, 20)
-        thresh_x = max(10, int(med_w * 0.6))
-        thresh_y = max(10, int(med_h * 0.6))
+        row_tol = max(8, int(med_h * 0.60))
+        col_tol = max(8, int(med_w * 0.60))
 
-        x_centers = [int((l + r) / 2) for (l, _t, r, _b) in boxes]
-        y_centers = [int((_t + _b) / 2) for (_l, _t, _r, _b) in boxes]
+        # Build rows by y-center clustering
+        items = []
+        for (l, t, r, b) in boxes:
+            xc = int((l + r) / 2)
+            yc = int((t + b) / 2)
+            items.append((yc, xc, (l, t, r, b)))
+        items.sort(key=lambda x: x[0])
 
-        col_centers = self._cluster_centers(x_centers, thresh_x)
-        row_centers = self._cluster_centers(y_centers, thresh_y)
-        if not col_centers or not row_centers:
+        rows: List[List[tuple[int, int, tuple[int, int, int, int]]]] = []
+        cur: List[tuple[int, int, tuple[int, int, int, int]]] = []
+        cur_y: Optional[float] = None
+        for yc, xc, box in items:
+            if cur_y is None:
+                cur = [(yc, xc, box)]
+                cur_y = float(yc)
+                continue
+            if abs(yc - cur_y) <= row_tol:
+                cur.append((yc, xc, box))
+                cur_y = (cur_y * (len(cur) - 1) + yc) / float(len(cur))
+            else:
+                cur.sort(key=lambda x: x[1])  # by x-center
+                rows.append(cur)
+                cur = [(yc, xc, box)]
+                cur_y = float(yc)
+        if cur:
+            cur.sort(key=lambda x: x[1])
+            rows.append(cur)
+
+        if not rows:
             return []
 
-        # Map cells to nearest row/col center; if collision, keep smallest area
-        def nearest_idx(v: int, centers: List[int]) -> int:
+        # Choose the row with the most cells as the template for column centers
+        template = max(rows, key=lambda r: len(r))
+        col_centers: List[int] = [xc for (_yc, xc, _box) in template]
+        if not col_centers:
+            return []
+
+        def nearest_col(xc: int) -> int:
             best_i = 0
-            best_d = abs(v - centers[0])
-            for i in range(1, len(centers)):
-                d = abs(v - centers[i])
+            best_d = abs(xc - col_centers[0])
+            for i in range(1, len(col_centers)):
+                d = abs(xc - col_centers[i])
                 if d < best_d:
                     best_d = d
                     best_i = i
             return best_i
 
-        grid: List[List[Optional[tuple[int, int, int, int]]]] = [
-            [None for _ in range(len(col_centers))] for _ in range(len(row_centers))
-        ]
+        # Build grid with stable column count
+        grid: List[List[Optional[tuple[int, int, int, int]]]] = [[None for _ in range(len(col_centers))] for _ in rows]
 
-        for (l, t, r, b), xc, yc in zip(boxes, x_centers, y_centers):
-            rr = nearest_idx(yc, row_centers)
-            cc = nearest_idx(xc, col_centers)
-            area = max(1, (r - l) * (b - t))
-            existing = grid[rr][cc]
-            if existing is None:
-                grid[rr][cc] = (l, t, r, b)
-            else:
-                el, et, er, eb = existing
-                earea = max(1, (er - el) * (eb - et))
-                if area < earea:
-                    grid[rr][cc] = (l, t, r, b)
+        for rr, row in enumerate(rows):
+            for (_yc, xc, box) in row:
+                cc = nearest_col(xc)
+                if abs(xc - col_centers[cc]) > col_tol:
+                    # Too far from any known column; append as a new column (rare, but prevents missing cols)
+                    col_centers.append(xc)
+                    for r0 in grid:
+                        r0.append(None)
+                    cc = len(col_centers) - 1
+
+                existing = grid[rr][cc]
+                if existing is None:
+                    grid[rr][cc] = box
+                else:
+                    # Collision: keep smaller area
+                    l, t, r, b = box
+                    area = max(1, (r - l) * (b - t))
+                    el, et, er, eb = existing
+                    earea = max(1, (er - el) * (eb - et))
+                    if area < earea:
+                        grid[rr][cc] = box
 
         return grid
 
