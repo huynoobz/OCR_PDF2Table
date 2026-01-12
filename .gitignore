@@ -42,6 +42,7 @@ Thumbs.db
 output/
 exports/
 auto_test_output/
+ui_settings.json
 *.png
 *.jpg
 *.jpeg

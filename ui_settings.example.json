@@ -1,0 +1,32 @@
+{
+  "default_dpi": 300,
+  "auto_fit_on_load": true,
+  "show_toolbar_hint": true,
+  "confirm_delete": true,
+  "keymap": {
+    "open_pdf": "Ctrl+O",
+    "export_selected": "Ctrl+Shift+E",
+    "settings": "Tab",
+    "settings_alt": "Ctrl+,",
+    "select_all": "Ctrl+A",
+    "select_none": "Ctrl+D",
+    "select_invert": "Ctrl+Shift+I",
+    "select_wizard": "Ctrl+Alt+S",
+    "select_odd": "Ctrl+Alt+O",
+    "select_even": "Ctrl+Alt+E",
+    "prev_page": "Left",
+    "next_page": "Right",
+    "zoom_in": "Ctrl++",
+    "zoom_out": "Ctrl+-",
+    "fit_to_window": "Ctrl+0",
+    "actual_size": "Ctrl+1",
+    "rotate_left": "Ctrl+L",
+    "rotate_right": "Ctrl+R",
+    "rotate_180": "Ctrl+Shift+R",
+    "reset_ops": "Ctrl+Alt+0",
+    "delete_selected": "Delete",
+    "start_crop": "C",
+    "clear_crop": "Shift+C"
+  }
+}
+
