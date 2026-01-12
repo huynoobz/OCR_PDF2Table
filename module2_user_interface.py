@@ -706,6 +706,20 @@ class ImageManagementUI:
 
         ttk.Separator(parent).pack(fill=tk.X, pady=8)
 
+        # OCR panel (shown when Cell Select is active)
+        self._ocr_panel = ttk.LabelFrame(parent, text="OCR", padding="6")
+        self._ocr_panel.pack(fill=tk.BOTH, expand=False)
+        self._ocr_panel.pack_forget()  # hidden by default; shown when tool == cell_select
+
+        ttk.Label(self._ocr_panel, text="Result:").pack(anchor=tk.W)
+        self.ocr_text = tk.Text(self._ocr_panel, height=8, wrap=tk.WORD)
+        self.ocr_text.pack(fill=tk.BOTH, expand=True, pady=(2, 4))
+
+        ocr_btns = ttk.Frame(self._ocr_panel)
+        ocr_btns.pack(fill=tk.X)
+        ttk.Button(ocr_btns, text="Detect text", command=self._ocr_to_textbox).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
+        ttk.Button(ocr_btns, text="Export…", command=self._ocr_selected_cells).pack(side=tk.LEFT, expand=True, fill=tk.X)
+
         ttk.Button(parent, text="Settings…", command=self._open_settings_window).pack(fill=tk.X, pady=2)
 
         # Apply tool bindings now that canvas exists
@@ -727,10 +741,12 @@ class ImageManagementUI:
         if tool == "hand":
             self.canvas.config(cursor="fleur")
             self.viewer._bind_viewer_events()
+            self._set_ocr_panel_visible(False)
             return
 
         if tool == "zoom":
             self.canvas.config(cursor="plus")
+            self._set_ocr_panel_visible(False)
 
             def zoom_in_click(event):
                 self.viewer.zoom_in()
@@ -749,15 +765,42 @@ class ImageManagementUI:
 
         if tool == "cell_select":
             self.canvas.config(cursor="tcross")
+            self._set_ocr_panel_visible(True)
 
             def pick(event):
                 self._toggle_cell_at_canvas_xy(event.x, event.y)
 
+            def show_menu(event):
+                self._show_ocr_context_menu(event.x_root, event.y_root)
+
             self.canvas.bind("<Button-1>", pick)
+            self.canvas.bind("<Button-3>", show_menu)
             self.canvas.bind("<MouseWheel>", self.viewer.on_wheel)
             self.canvas.bind("<Button-4>", self.viewer.on_wheel)
             self.canvas.bind("<Button-5>", self.viewer.on_wheel)
             return
+
+        self._set_ocr_panel_visible(False)
+
+    def _set_ocr_panel_visible(self, visible: bool):
+        if not hasattr(self, "_ocr_panel") or self._ocr_panel is None:
+            return
+        if visible:
+            if not self._ocr_panel.winfo_ismapped():
+                self._ocr_panel.pack(fill=tk.BOTH, expand=False)
+        else:
+            if self._ocr_panel.winfo_ismapped():
+                self._ocr_panel.pack_forget()
+
+    def _show_ocr_context_menu(self, x_root: int, y_root: int):
+        """Context menu for OCR actions (only meaningful in Cell Select mode)."""
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="Detect text (to box)", command=self._ocr_to_textbox)
+        menu.add_command(label="Export OCR result…", command=self._ocr_selected_cells)
+        try:
+            menu.tk_popup(x_root, y_root)
+        finally:
+            menu.grab_release()
 
     # ----------------------------
     # Toolbar / Menus
@@ -1646,23 +1689,8 @@ class ImageManagementUI:
           - some cells selected (Cell Select tool)
           - Tesseract installed + pytesseract installed
         """
-        if self.current_index < 0 or self.current_index >= len(self.processed_images):
-            messagebox.showwarning("OCR", "No page selected.")
-            return
-        editor = self._ensure_editor(self.current_index)
-        if editor.table_cells_mask is None:
-            messagebox.showwarning("OCR", "No cells mask. Run Edit → Detect table cells first.")
-            return
-        self._ensure_cell_boxes(editor)
-        if not editor.selected_cell_indices:
-            messagebox.showwarning("OCR", "No cells selected. Use Tool → Cell Select (OCR) then click cells.")
-            return
-
-        base = editor.get_base_image()
-        if base is None:
-            base = editor.get_current_image()
-        if base is None:
-            messagebox.showerror("OCR", "No image data available.")
+        text = self._ocr_selected_cells_text()
+        if text is None:
             return
 
         out_path = filedialog.asksaveasfilename(
@@ -1673,8 +1701,35 @@ class ImageManagementUI:
         if not out_path:
             return
 
-        lang = str(getattr(self.settings, "ocr_lang", "eng") or "eng").strip()
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(text.rstrip() + "\n")
+            messagebox.showinfo("OCR", f"Saved OCR to:\n{out_path}")
+        except Exception as e:
+            messagebox.showerror("OCR", f"Failed to save file: {e}")
 
+    def _ocr_selected_cells_text(self) -> Optional[str]:
+        """Return OCR output text for selected cells, or None if prerequisites aren't met."""
+        if self.current_index < 0 or self.current_index >= len(self.processed_images):
+            messagebox.showwarning("OCR", "No page selected.")
+            return None
+        editor = self._ensure_editor(self.current_index)
+        if editor.table_cells_mask is None:
+            messagebox.showwarning("OCR", "No cells mask. Run Edit → Detect table cells first.")
+            return None
+        self._ensure_cell_boxes(editor)
+        if not editor.selected_cell_indices:
+            messagebox.showwarning("OCR", "No cells selected. Use Tool → Cell Select (OCR) then click cells.")
+            return None
+
+        base = editor.get_base_image()
+        if base is None:
+            base = editor.get_current_image()
+        if base is None:
+            messagebox.showerror("OCR", "No image data available.")
+            return None
+
+        lang = str(getattr(self.settings, "ocr_lang", "eng") or "eng").strip()
         lines: List[str] = []
         lines.append(f"page={self.processed_images[self.current_index].metadata.page_number}")
         lines.append(f"lang={lang}")
@@ -1689,18 +1744,22 @@ class ImageManagementUI:
                 text = ocr_image_pil(crop, config=OCRConfig(lang=lang, psm=6))
             except Exception as e:
                 messagebox.showerror("OCR", f"OCR failed: {e}\n\nMake sure Tesseract OCR is installed and on PATH.")
-                return
+                return None
             text = (text or "").strip()
             lines.append(f"[cell {idx}] box=({l},{t},{r},{b})")
             lines.append(text)
             lines.append("")
 
-        try:
-            with open(out_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines).rstrip() + "\n")
-            messagebox.showinfo("OCR", f"Saved OCR to:\n{out_path}")
-        except Exception as e:
-            messagebox.showerror("OCR", f"Failed to save file: {e}")
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _ocr_to_textbox(self):
+        """Run OCR for selected cells and put the result into the OCR textbox."""
+        text = self._ocr_selected_cells_text()
+        if text is None:
+            return
+        if hasattr(self, "ocr_text") and self.ocr_text is not None:
+            self.ocr_text.delete("1.0", tk.END)
+            self.ocr_text.insert("1.0", text)
     
     def _update_listbox(self):
         """Update the image listbox."""
