@@ -612,18 +612,8 @@ class ImageManagementUI:
         self.image_listbox.bind("<<ListboxSelect>>", self._on_listbox_select)
         self.image_listbox.bind("<Double-Button-1>", self._on_listbox_double_click)
 
-        # Image management buttons (move next to the list)
-        btn_frame = ttk.Frame(list_panel)
-        btn_frame.pack(fill=tk.X, pady=(6, 0))
+        # (Removed) image management buttons: keep UI clean; actions remain in menu/shortcuts.
 
-        ttk.Button(btn_frame, text="Load from Module 1", command=self._load_from_module1).pack(fill=tk.X, pady=2)
-        ttk.Button(btn_frame, text="Add External", command=self._add_external_image).pack(fill=tk.X, pady=2)
-        ttk.Button(btn_frame, text="Delete Selected", command=self._delete_selected).pack(fill=tk.X, pady=2)
-        ttk.Button(btn_frame, text="Move Up", command=self._move_up).pack(fill=tk.X, pady=2)
-        ttk.Button(btn_frame, text="Move Down", command=self._move_down).pack(fill=tk.X, pady=2)
-        ttk.Button(btn_frame, text="Export Selected", command=self._export_selected).pack(fill=tk.X, pady=2)
-        ttk.Button(btn_frame, text="Export All", command=self._export_all).pack(fill=tk.X, pady=2)
-        
         # Viewer frame
         viewer_frame = ttk.Frame(right_panel)
         viewer_frame.pack(fill=tk.BOTH, expand=True)
