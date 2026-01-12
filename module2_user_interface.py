@@ -1409,6 +1409,7 @@ class ImageManagementUI:
             self.root.update_idletasks()
 
             all_rows: List[List[str]] = []
+            max_cols = 0
 
             for i in range(len(self.processed_images)):
                 if cancelled["v"]:
@@ -1465,7 +1466,16 @@ class ImageManagementUI:
                     win.update_idletasks()
                     continue
 
+                # Normalize column count so missing cells don't shift columns in merged CSV.
+                page_cols = max((len(r) for r in table), default=0)
+                if page_cols > max_cols:
+                    for r0 in all_rows:
+                        r0.extend([""] * (page_cols - max_cols))
+                    max_cols = page_cols
+
                 for r in table:
+                    if len(r) < max_cols:
+                        r = r + [""] * (max_cols - len(r))
                     all_rows.append(r)
 
                 pb["value"] = i + 1
