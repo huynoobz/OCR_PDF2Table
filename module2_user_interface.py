@@ -12,6 +12,7 @@ import os
 import re
 import json
 import csv
+import concurrent.futures
 from dataclasses import dataclass, asdict
 from PIL import ImageDraw
 import numpy as np
@@ -1000,6 +1001,12 @@ class ImageManagementUI:
     # Export Table (CSV)
     # ----------------------------
     @staticmethod
+    def _default_ocr_workers() -> int:
+        # Tesseract is CPU-heavy; keep a sane cap to avoid making the machine unresponsive.
+        n = int(os.cpu_count() or 4)
+        return max(1, min(8, n - 2))
+
+    @staticmethod
     def _median_int(vals: List[int], default: int) -> int:
         if not vals:
             return int(default)
@@ -1111,23 +1118,35 @@ class ImageManagementUI:
         return True
 
     def _ocr_table_grid(self, base: Image.Image, grid_boxes: List[List[Optional[tuple[int, int, int, int]]]]) -> List[List[str]]:
+        """
+        Parallel OCR (per-cell) without UI progress. Used by all-pages export.
+        """
         lang = str(getattr(self.settings, "ocr_lang", "eng") or "eng").strip()
         prefix_quote = bool(getattr(self.settings, "csv_insert_prefix_quote", False))
-        out: List[List[str]] = []
-        for row in grid_boxes:
-            out_row: List[str] = []
-            for box in row:
+        max_workers = self._default_ocr_workers()
+
+        out: List[List[str]] = [["" for _ in row] for row in grid_boxes]
+        tasks: List[tuple[int, int, Image.Image]] = []
+        for ri, row in enumerate(grid_boxes):
+            for ci, box in enumerate(row):
                 if box is None:
-                    out_row.append("")
                     continue
                 l, t, r, b = box
-                crop = base.crop((l, t, r, b))
-                text = ocr_image_pil(crop, config=OCRConfig(lang=lang, psm=6))
-                val = (text or "").strip()
-                if prefix_quote and val and not val.startswith("'"):
-                    val = "'" + val
-                out_row.append(val)
-            out.append(out_row)
+                tasks.append((ri, ci, base.crop((l, t, r, b))))
+
+        def _ocr_one(img: Image.Image) -> str:
+            txt = ocr_image_pil(img, config=OCRConfig(lang=lang, psm=6))
+            val = (txt or "").strip()
+            if prefix_quote and val and not val.startswith("'"):
+                val = "'" + val
+            return val
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            future_to_pos = {ex.submit(_ocr_one, crop): (ri, ci) for (ri, ci, crop) in tasks}
+            for fut in concurrent.futures.as_completed(future_to_pos):
+                ri, ci = future_to_pos[fut]
+                out[ri][ci] = fut.result()
+
         return out
 
     def _write_csv(self, path: str, table: List[List[str]]):
@@ -1158,38 +1177,52 @@ class ImageManagementUI:
         cancelled: dict,
         page_num: int,
     ) -> Optional[List[List[str]]]:
-        """OCR a grid and update a progressbar; returns None if cancelled."""
+        """Parallel OCR a grid and update a progressbar; returns None if cancelled."""
         lang = str(getattr(self.settings, "ocr_lang", "eng") or "eng").strip()
         prefix_quote = bool(getattr(self.settings, "csv_insert_prefix_quote", False))
+        max_workers = self._default_ocr_workers()
         total = sum(1 for row in grid_boxes for box in row if box is not None)
         pb["maximum"] = max(1, int(total))
         pb["value"] = 0
 
-        done = 0
-        out: List[List[str]] = []
-        for r_i, row in enumerate(grid_boxes):
-            out_row: List[str] = []
-            for c_i, box in enumerate(row):
-                if cancelled.get("v"):
-                    return None
+        out: List[List[str]] = [["" for _ in row] for row in grid_boxes]
+        tasks: List[tuple[int, int, Image.Image]] = []
+        for ri, row in enumerate(grid_boxes):
+            for ci, box in enumerate(row):
                 if box is None:
-                    out_row.append("")
                     continue
                 l, t, r, b = box
-                crop = base.crop((l, t, r, b))
-                text = ocr_image_pil(crop, config=OCRConfig(lang=lang, psm=6))
-                val = (text or "").strip()
-                if prefix_quote and val and not val.startswith("'"):
-                    val = "'" + val
-                out_row.append(val)
+                tasks.append((ri, ci, base.crop((l, t, r, b))))
 
-                done += 1
-                # Update UI occasionally for speed
-                if done == 1 or done % 10 == 0 or done == total:
-                    status.config(text=f"Page {page_num}: OCR {done}/{total} cells…")
-                    pb["value"] = done
-                    win.update_idletasks()
-            out.append(out_row)
+        def _ocr_one(img: Image.Image) -> str:
+            txt = ocr_image_pil(img, config=OCRConfig(lang=lang, psm=6))
+            val = (txt or "").strip()
+            if prefix_quote and val and not val.startswith("'"):
+                val = "'" + val
+            return val
+
+        done = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            future_to_pos = {ex.submit(_ocr_one, crop): (ri, ci) for (ri, ci, crop) in tasks}
+            try:
+                for fut in concurrent.futures.as_completed(future_to_pos):
+                    if cancelled.get("v"):
+                        # Cancel pending tasks (best-effort)
+                        try:
+                            ex.shutdown(cancel_futures=True)
+                        except Exception:
+                            pass
+                        return None
+                    ri, ci = future_to_pos[fut]
+                    out[ri][ci] = fut.result()
+                    done += 1
+                    if done == 1 or done % 10 == 0 or done == total:
+                        status.config(text=f"Page {page_num}: OCR {done}/{total} cells… ({max_workers} workers)")
+                        pb["value"] = done
+                        win.update_idletasks()
+            except Exception:
+                raise
+
         return out
 
     def _export_table_csv_current(self):
