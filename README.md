@@ -1,16 +1,33 @@
-# OCR PDF to Table - Image Processing System
+# OCR_PDF2Table
 
-A two-module system for processing PDF files into images with advanced image processing capabilities and a user interface for inspection and manipulation.
+Desktop tool to **extract tables from PDFs/images** using:
+- **Table detection** (OpenCV) → cell grid
+- **OCR** (Tesseract via `pytesseract`) → per-cell text
+- **CSV export** (current page / all pages / selected pages via wizard)
 
-## Modules
+## Quick start (run the UI)
 
-### Module 1: Input and Image Processing
-Pure logic module for PDF to image conversion and image processing pipeline.
+### Run from Python (dev)
 
-### Module 2: User Interface
-GUI module for visual inspection, manipulation, and export of processed images.
+```bash
+python main.py ui
+```
 
-## Installation
+### Run the EXE (Windows)
+
+After building, run:
+- `dist\OCR_PDF2Table.exe`
+
+## Features (high level)
+
+- **Detect table**: finds table lines + cells and lets you show masks
+- **OCR selected cells**: right-click a cell to OCR/export text (after Detect table)
+- **Export table to CSV**:
+  - current page
+  - all pages merged
+  - **wizard**: choose pages like `1,2` or `1-5`
+
+## Installation (prerequisites)
 
 ### 1) Python dependencies
 
@@ -20,49 +37,40 @@ pip install -r requirements.txt
 
 ### 2) Poppler (required for PDF → images)
 
-`pdf2image` relies on Poppler on Windows (and commonly on other platforms) to rasterize PDFs.
+`pdf2image` needs Poppler to rasterize PDF pages.
 
-- Windows: Download from [poppler-windows](https://github.com/oschwartz10612/poppler-windows/releases/)
-  - After download, either add Poppler `bin` to your PATH, or use the portable EXE layout described below (`vendor\poppler\...`)
-- Linux: `sudo apt-get install poppler-utils`
-- macOS: `brew install poppler`
+- **Windows**: download Poppler from [poppler-windows releases](https://github.com/oschwartz10612/poppler-windows/releases/)
+  - Add the Poppler `bin` folder to your PATH **or** use the portable EXE layout below (`vendor\poppler\...`).
+- **Linux**: `sudo apt-get install poppler-utils`
+- **macOS**: `brew install poppler`
 
 ### 3) Tesseract OCR (required for OCR)
 
-`pytesseract` is a Python wrapper, but you still must install **Tesseract OCR** itself.
+`pytesseract` is only a wrapper. You must install **Tesseract**.
 
-- Windows:
-  - Install Tesseract (a common choice is the UB-Mannheim Windows installer).
-  - Ensure `tesseract.exe` is on PATH (or use the portable EXE layout described below: `vendor\tesseract\...`).
-- Linux:
-  - `sudo apt-get install tesseract-ocr`
-- macOS:
-  - `brew install tesseract`
+- **Windows**: install Tesseract (commonly the “UB Mannheim” installer) and ensure `tesseract.exe` is on PATH (or use portable layout: `vendor\tesseract\...`).
+- **Linux**: `sudo apt-get install tesseract-ocr`
+- **macOS**: `brew install tesseract`
 
 ### 4) Install OCR language traineddata
 
-Tesseract uses `*.traineddata` language packs (e.g. `eng.traineddata`, `vie.traineddata`).
+Tesseract uses `*.traineddata` files (example: `eng.traineddata`, `vie.traineddata`).
 
-- Windows:
-  - Find your `tessdata` folder (typical locations):
-    - `C:\Program Files\Tesseract-OCR\tessdata`
-    - or if using portable layout: `vendor\tesseract\tessdata`
-  - Download the languages you need and put the `*.traineddata` files into that `tessdata` folder.
-  - If Tesseract can’t find languages, set an environment variable:
-    - `TESSDATA_PREFIX` = path to the `tessdata` folder
-- Linux:
-  - Install languages via packages (example):
-    - `sudo apt-get install tesseract-ocr-eng tesseract-ocr-vie`
-- macOS:
-  - Homebrew usually ships English; for more languages, install additional language files or point `TESSDATA_PREFIX` to your `tessdata`.
+- **Download**:
+  - Best quality: `https://github.com/tesseract-ocr/tessdata_best`
+  - Faster: `https://github.com/tesseract-ocr/tessdata_fast`
 
-Language data downloads (official repo):
-- Best-trained models: `https://github.com/tesseract-ocr/tessdata_best`
-- Fast models: `https://github.com/tesseract-ocr/tessdata_fast`
+- **Where to put them**:
+  - **Windows installed Tesseract**: usually `C:\Program Files\Tesseract-OCR\tessdata`
+  - **Portable layout**: `vendor\tesseract\tessdata`
 
-In the app, set the OCR language in **Settings → OCR language** (example values: `eng`, `vie`, or multi-lang like `eng+vie`).
+- **If languages are not found**: set `TESSDATA_PREFIX` to the **folder that contains** `tessdata`.
 
-## Set up a dev environment (recommended)
+In the app, set OCR language in **Settings → OCR language**:
+- Single language: `eng`, `vie`, `jpn`
+- Multi-language: `eng+vie`
+
+## Set up a dev environment
 
 ### Windows (PowerShell)
 
@@ -84,41 +92,49 @@ pip install -r requirements.txt
 python main.py ui
 ```
 
-If you get PDF loading errors, verify Poppler is installed and available. If OCR fails, verify `tesseract` is installed and that your selected `ocr_lang` exists in `tessdata`.
+## Export table wizard (page selection syntax)
+
+Open **File → Export table (CSV) – wizard…** and enter:
+- `1,2` = pages 1 and 2
+- `1-5` = pages 1 to 5
+- `1-3,7,10-12` = ranges + single pages
+- `all` = all pages
+
+Pages are **1-based** in the wizard.
 
 ## Build a single-file EXE (Windows)
-
-This project can be packaged into **one** `OCR_PDF2Table.exe` using PyInstaller.
-
-1. In PowerShell, from the project folder, run:
 
 ```powershell
 .\build_exe.ps1
 ```
 
-2. Output:
+Output:
 - `dist\OCR_PDF2Table.exe`
 
-### Optional: bundle Poppler/Tesseract next to the EXE (portable)
+### Portable mode (bundle Poppler/Tesseract next to the EXE)
 
-If you want the EXE to work on another PC without installing Poppler/Tesseract globally,
-place them next to the EXE in a `vendor\` folder:
+If you want the EXE to run on another PC without installing Poppler/Tesseract globally,
+create a `vendor\` folder next to the EXE:
 
 - **Poppler**:
-  - `vendor\poppler\bin\...`  (or `vendor\poppler\Library\bin\...`)
+  - `vendor\poppler\bin\...` *(or `vendor\poppler\Library\bin\...`)*
 - **Tesseract**:
   - `vendor\tesseract\tesseract.exe`
   - `vendor\tesseract\tessdata\...`
 
-The app auto-detects these paths at runtime.
+The app auto-detects these paths.
 
-## Usage
+## CLI usage (optional)
 
-```python
-from module1_image_processing import PDFImageProcessor
-
-processor = PDFImageProcessor()
-images = processor.process_pdf("path/to/file.pdf", dpi=300)
+```bash
+python main.py ui
+python main.py test --pdf test.pdf --out auto_test_output --dpi 300
 ```
 
-Then use Module 2 to view and manipulate the images.
+## Troubleshooting
+
+- **PDF load fails (Windows)**: Poppler not installed or not found.
+  - Fix: add Poppler `bin` to PATH or place it in `vendor\poppler\bin` next to the EXE.
+- **OCR fails / language not found**: Tesseract or traineddata missing.
+  - Fix: install Tesseract, ensure `tesseract.exe` is on PATH, and put `*.traineddata` into `tessdata`.
+  - If needed set: `TESSDATA_PREFIX`.
