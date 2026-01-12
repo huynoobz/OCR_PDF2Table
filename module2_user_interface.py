@@ -1925,7 +1925,10 @@ class ImageManagementUI:
         ttk.Entry(general, textvariable=ocr_lang_var, width=20).grid(row=row, column=1, sticky=tk.W, pady=4)
         row += 1
 
-        ttk.Label(general, text="CSV delimiter (char or: tab, space, \\\\t, \\\\x09):").grid(row=row, column=0, sticky=tk.W, pady=4)
+        ttk.Label(
+            general,
+            text="CSV delimiter (examples: ,  ;  |  tab  space  \\\\t  \\\\x09)",
+        ).grid(row=row, column=0, sticky=tk.W, pady=4)
         ttk.Entry(general, textvariable=csv_delim_var, width=20).grid(row=row, column=1, sticky=tk.W, pady=4)
         row += 1
 
@@ -2024,10 +2027,12 @@ class ImageManagementUI:
                 # Likely invalid (e.g. "enter"/"\\n"/multi-char). Warn once.
                 messagebox.showwarning(
                     "Settings",
-                    "CSV delimiter must be a single character.\n"
-                    "Supported keywords: tab, space. Supported escape: \\xNN.\n"
-                    "Note: Enter/newline cannot be used as a CSV delimiter.\n\n"
-                    "Using ','.",
+                    "CSV delimiter must be ONE separator.\n\n"
+                    "Use a single character (example: ,  ;  |)\n"
+                    "or keywords: tab, space\n"
+                    "or escape: \\t, \\x09\n\n"
+                    "Note: Enter/newline cannot be used as a delimiter.\n\n"
+                    "Falling back to ','.",
                 )
             # Store a stable, human-editable representation in JSON.
             # (If we store a literal tab, it can be stripped by some editors/parsers.)
