@@ -56,12 +56,24 @@ class ImageViewer:
         self.canvas.bind("<Button-4>", self.on_wheel)  # Linux
         self.canvas.bind("<Button-5>", self.on_wheel)  # Linux
     
-    def set_image(self, pil_image: Image.Image):
+    def set_image(self, pil_image: Image.Image, *, reset_view: bool = True):
         """Set the image to display."""
         self.image = pil_image.copy()
-        self.scale = 1.0
-        self.offset_x = 0
-        self.offset_y = 0
+        if reset_view:
+            self.scale = 1.0
+            self.offset_x = 0
+            self.offset_y = 0
+        self._update_display()
+
+    def get_view_state(self) -> tuple[float, int, int]:
+        """Return (scale, offset_x, offset_y)."""
+        return (float(self.scale), int(self.offset_x), int(self.offset_y))
+
+    def set_view_state(self, scale: float, offset_x: int, offset_y: int):
+        """Set (scale, offset_x, offset_y) without changing the image."""
+        self.scale = float(scale)
+        self.offset_x = int(offset_x)
+        self.offset_y = int(offset_y)
         self._update_display()
     
     def _update_display(self):
@@ -321,6 +333,10 @@ class ImageManagementUI:
         # Used by the Select Wizard dialog (menu); kept even if the left-panel wizard is hidden.
         self.select_pattern_var = tk.StringVar(value="")
         self.show_table_mask_var = tk.BooleanVar(value=False)
+
+        # Preserve per-page view (zoom/pan) so switching pages doesn't reset.
+        self._view_state_by_index: Dict[int, tuple[float, int, int]] = {}
+        self._viewer_current_index: Optional[int] = None
         
         # Create UI
         self._create_ui()
@@ -1302,6 +1318,7 @@ class ImageManagementUI:
         """Handle listbox selection."""
         selected = self.image_listbox.curselection()
         if selected:
+            self._save_current_view_state()
             # Keep current_index stable when multi-selecting; if current is not
             # in selection, move it to the first selected.
             if self.current_index not in selected:
@@ -1318,6 +1335,7 @@ class ImageManagementUI:
     def _prev_image(self):
         """Go to previous image."""
         if self.processed_images and self.current_index > 0:
+            self._save_current_view_state()
             self.current_index -= 1
             self._update_listbox()
             self._display_current_image()
@@ -1325,6 +1343,7 @@ class ImageManagementUI:
     def _next_image(self):
         """Go to next image."""
         if self.processed_images and self.current_index < len(self.processed_images) - 1:
+            self._save_current_view_state()
             self.current_index += 1
             self._update_listbox()
             self._display_current_image()
@@ -1351,7 +1370,21 @@ class ImageManagementUI:
         display_img = current_img
         if self.show_table_mask_var.get() and editor.table_mask is not None:
             display_img = self._composite_table_mask(display_img, editor.table_mask)
-        self.viewer.set_image(display_img)
+
+        # Preserve view: if we're refreshing the same page (e.g. brush stroke), don't reset.
+        same_page = (self._viewer_current_index == self.current_index)
+        if not same_page:
+            # If switching pages, restore previously saved view if available.
+            if self.current_index in self._view_state_by_index:
+                scale, ox, oy = self._view_state_by_index[self.current_index]
+                self.viewer.set_image(display_img, reset_view=False)
+                self.viewer.set_view_state(scale, ox, oy)
+            else:
+                self.viewer.set_image(display_img, reset_view=True)
+        else:
+            self.viewer.set_image(display_img, reset_view=False)
+
+        self._viewer_current_index = self.current_index
         
         # Update page label
         self.page_label.config(text=f"{self.current_index + 1} / {len(self.processed_images)}")
@@ -1378,6 +1411,14 @@ class ImageManagementUI:
     def _refresh_view(self):
         """Refresh current viewer without changing selection."""
         self._display_current_image()
+
+    def _save_current_view_state(self):
+        """Save current viewer zoom/pan for the currently displayed page."""
+        if not hasattr(self, "viewer"):
+            return
+        if self._viewer_current_index is None:
+            return
+        self._view_state_by_index[self._viewer_current_index] = self.viewer.get_view_state()
 
     def _composite_table_mask(self, base_img: Image.Image, mask_l: Image.Image) -> Image.Image:
         """
