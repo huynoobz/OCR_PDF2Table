@@ -904,14 +904,27 @@ class ImageManagementUI:
         if p is None:
             return
         ix, iy = int(p[0]), int(p[1])
+
+        # Some masks can produce overlapping/nested boxes; choose the *smallest* box
+        # that contains the click to avoid "selecting everything".
+        best_idx: Optional[int] = None
+        best_area: Optional[int] = None
         for i, (l, t, r, b) in enumerate(editor.table_cell_boxes):
             if l <= ix < r and t <= iy < b:
-                if i in editor.selected_cell_indices:
-                    editor.selected_cell_indices.remove(i)
-                else:
-                    editor.selected_cell_indices.add(i)
-                self._display_current_image()
-                return
+                area = max(1, (r - l) * (b - t))
+                if best_area is None or area < best_area:
+                    best_area = area
+                    best_idx = i
+
+        if best_idx is None:
+            return
+
+        if best_idx in editor.selected_cell_indices:
+            editor.selected_cell_indices.remove(best_idx)
+        else:
+            editor.selected_cell_indices.add(best_idx)
+        self._display_current_image()
+        return
 
     def _ensure_editor(self, idx: int) -> ImageEditor:
         if idx not in self.image_editors:
