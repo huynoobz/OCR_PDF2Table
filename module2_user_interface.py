@@ -663,6 +663,8 @@ class ImageManagementUI:
             self._display_current_image()
             if getattr(self.settings, "auto_fit_on_load", False):
                 self.viewer.fit_to_window()
+                if 0 <= self.current_index < len(self.processed_images):
+                    self._view_state_by_index[self.current_index] = self.viewer.get_view_state()
 
     # ----------------------------
     # Tools palette
@@ -1520,6 +1522,10 @@ class ImageManagementUI:
                 self.viewer.set_view_state(scale, ox, oy)
             else:
                 self.viewer.set_image(display_img, reset_view=True)
+                # Auto-fit only on first view of this page (won't override user zoom later)
+                if getattr(self.settings, "auto_fit_on_load", False):
+                    self.viewer.fit_to_window()
+                    self._view_state_by_index[self.current_index] = self.viewer.get_view_state()
         else:
             self.viewer.set_image(display_img, reset_view=False)
 
