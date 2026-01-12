@@ -1766,6 +1766,13 @@ class ImageManagementUI:
             self.image_editors[self.current_index] = editor
         else:
             editor = self.image_editors[self.current_index]
+
+        # Sync mask checkboxes to current page availability:
+        # if the current page has no mask, the corresponding "Show mask" should untick.
+        if editor.table_mask is None and self.show_table_mask_var.get():
+            self.show_table_mask_var.set(False)
+        if editor.table_cells_mask is None and self.show_table_cells_var.get():
+            self.show_table_cells_var.set(False)
         
         # Display edited image (+ optional table mask overlay)
         current_img = editor.get_current_image()
