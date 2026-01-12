@@ -1113,26 +1113,56 @@ class ImageManagementUI:
             for row in table:
                 w.writerow(row)
 
+    def _ocr_table_grid_with_progress(
+        self,
+        base: Image.Image,
+        grid_boxes: List[List[Optional[tuple[int, int, int, int]]]],
+        *,
+        win: tk.Toplevel,
+        status: ttk.Label,
+        pb: ttk.Progressbar,
+        cancelled: dict,
+        page_num: int,
+    ) -> Optional[List[List[str]]]:
+        """OCR a grid and update a progressbar; returns None if cancelled."""
+        lang = str(getattr(self.settings, "ocr_lang", "eng") or "eng").strip()
+        prefix_quote = bool(getattr(self.settings, "csv_insert_prefix_quote", False))
+        total = sum(1 for row in grid_boxes for box in row if box is not None)
+        pb["maximum"] = max(1, int(total))
+        pb["value"] = 0
+
+        done = 0
+        out: List[List[str]] = []
+        for r_i, row in enumerate(grid_boxes):
+            out_row: List[str] = []
+            for c_i, box in enumerate(row):
+                if cancelled.get("v"):
+                    return None
+                if box is None:
+                    out_row.append("")
+                    continue
+                l, t, r, b = box
+                crop = base.crop((l, t, r, b))
+                text = ocr_image_pil(crop, config=OCRConfig(lang=lang, psm=6))
+                val = (text or "").strip()
+                if prefix_quote and val and not val.startswith("'"):
+                    val = "'" + val
+                out_row.append(val)
+
+                done += 1
+                # Update UI occasionally for speed
+                if done == 1 or done % 10 == 0 or done == total:
+                    status.config(text=f"Page {page_num}: OCR {done}/{total} cells…")
+                    pb["value"] = done
+                    win.update_idletasks()
+            out.append(out_row)
+        return out
+
     def _export_table_csv_current(self):
         if self.current_index < 0 or self.current_index >= len(self.processed_images):
             messagebox.showwarning("CSV", "No page selected.")
             return
-        editor = self._ensure_editor(self.current_index)
-        if editor.table_cells_mask is None:
-            # Auto-detect on demand
-            ok = self._detect_table_for_index(self.current_index, show_masks=False)
-            editor = self._ensure_editor(self.current_index)
-            if not ok or editor.table_cells_mask is None:
-                messagebox.showwarning("CSV", "Detect table failed for this page.")
-                return
-        self._ensure_cell_boxes(editor)
-        if not editor.table_cell_boxes:
-            messagebox.showwarning("CSV", "No cells found (after Detect table).")
-            return
-        base = editor.get_base_image() or editor.get_current_image()
-        if base is None:
-            messagebox.showerror("CSV", "No image data available.")
-            return
+        page_num = self.processed_images[self.current_index].metadata.page_number
 
         out_path = filedialog.asksaveasfilename(
             title="Save table CSV (current page)",
@@ -1142,14 +1172,79 @@ class ImageManagementUI:
         if not out_path:
             return
 
+        # Modal progress window (same UX as all-pages export)
+        cancelled = {"v": False}
+        win = tk.Toplevel(self.root)
+        win.title("Export table to CSV")
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+        ttk.Label(win, text="Exporting table (Detect table + OCR) …").pack(anchor=tk.W, padx=10, pady=(10, 4))
+        status = ttk.Label(win, text=f"Page {page_num}: preparing…")
+        status.pack(anchor=tk.W, padx=10, pady=(0, 8))
+        pb = ttk.Progressbar(win, mode="determinate", maximum=1)
+        pb.pack(fill=tk.X, padx=10, pady=(0, 10))
+        btns = ttk.Frame(win)
+        btns.pack(fill=tk.X, padx=10, pady=(0, 10))
+        ttk.Button(btns, text="Cancel", command=lambda: cancelled.__setitem__("v", True)).pack(side=tk.RIGHT)
+        win.protocol("WM_DELETE_WINDOW", lambda: None)
+
         try:
             self.root.config(cursor="watch")
             self.root.update_idletasks()
+
+            # Ensure table exists (auto-detect if needed)
+            editor = self._ensure_editor(self.current_index)
+            if editor.table_cells_mask is None:
+                status.config(text=f"Page {page_num}: detecting table…")
+                pb["maximum"] = 1
+                pb["value"] = 0
+                win.update_idletasks()
+                ok = self._detect_table_for_index(self.current_index, show_masks=False)
+                editor = self._ensure_editor(self.current_index)
+                if cancelled.get("v"):
+                    messagebox.showwarning("CSV", "Export cancelled.")
+                    return
+                if not ok or editor.table_cells_mask is None:
+                    messagebox.showwarning("CSV", "Detect table failed for this page.")
+                    return
+
+            self._ensure_cell_boxes(editor)
+            if not editor.table_cell_boxes:
+                messagebox.showwarning("CSV", "No cells found (after Detect table).")
+                return
+            base = editor.get_base_image() or editor.get_current_image()
+            if base is None:
+                messagebox.showerror("CSV", "No image data available.")
+                return
+
+            status.config(text=f"Page {page_num}: building grid…")
+            pb["maximum"] = 1
+            pb["value"] = 0
+            win.update_idletasks()
             grid_boxes = self._build_table_grid_boxes(editor.table_cell_boxes)
             if not grid_boxes:
                 messagebox.showerror("CSV", "Failed to build a table grid from detected cells.")
                 return
-            table = self._ocr_table_grid(base, grid_boxes)
+            status.config(text=f"Page {page_num}: OCR…")
+            win.update_idletasks()
+            table = self._ocr_table_grid_with_progress(
+                base,
+                grid_boxes,
+                win=win,
+                status=status,
+                pb=pb,
+                cancelled=cancelled,
+                page_num=page_num,
+            )
+            if table is None:
+                messagebox.showwarning("CSV", "Export cancelled.")
+                return
+
+            status.config(text="Writing CSV…")
+            pb["maximum"] = 1
+            pb["value"] = 1
+            win.update_idletasks()
             self._write_csv(out_path, table)
             messagebox.showinfo("CSV", f"Saved CSV to:\n{out_path}")
         except Exception as e:
@@ -1157,6 +1252,14 @@ class ImageManagementUI:
         finally:
             try:
                 self.root.config(cursor="")
+            except Exception:
+                pass
+            try:
+                win.grab_release()
+            except Exception:
+                pass
+            try:
+                win.destroy()
             except Exception:
                 pass
 
