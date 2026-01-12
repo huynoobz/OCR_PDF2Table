@@ -524,6 +524,9 @@ class ImageManagementUI:
         self._shortcut_bind_ids: Dict[str, str] = {}
         # Used by the Select Wizard dialog (menu); kept even if the left-panel wizard is hidden.
         self.select_pattern_var = tk.StringVar(value="")
+        # Table overlays
+        self.show_table_mask_var = tk.BooleanVar(value=False)
+        self.show_table_cells_var = tk.BooleanVar(value=False)
 
         # Preserve per-page view (zoom/pan) so switching pages doesn't reset.
         self._view_state_by_index: Dict[int, tuple[float, int, int]] = {}
@@ -755,6 +758,26 @@ class ImageManagementUI:
         edit_menu.add_command(label="Rotate -90°", command=lambda: self._rotate(-90))
         edit_menu.add_command(label="Rotate +90°", command=lambda: self._rotate(90))
         edit_menu.add_command(label="Rotate 180°", command=lambda: self._rotate(180))
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Detect table lines", command=self._detect_table_selected)
+        edit_menu.add_checkbutton(
+            label="Show table lines mask",
+            onvalue=True,
+            offvalue=False,
+            variable=self.show_table_mask_var,
+            command=self._refresh_view,
+        )
+        edit_menu.add_command(label="Detect table cells", command=self._detect_table_cells_selected)
+        edit_menu.add_checkbutton(
+            label="Show table cells mask",
+            onvalue=True,
+            offvalue=False,
+            variable=self.show_table_cells_var,
+            command=self._refresh_view,
+        )
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Clear table lines mask", command=self._clear_table_mask_selected)
+        edit_menu.add_command(label="Clear table cells mask", command=self._clear_table_cells_mask_selected)
         edit_btn["menu"] = edit_menu
         edit_btn.pack(side=tk.LEFT, padx=(0, 6))
 
@@ -882,7 +905,68 @@ class ImageManagementUI:
                 self.image_editors[idx].clear_paint()
         self._display_current_image()
 
-    # (Table detection UI removed)
+    # ----------------------------
+    # Table detection (mask overlays)
+    # ----------------------------
+    def _detect_table_selected(self):
+        """Compute table line mask for all selected images (or current)."""
+        targets = self._get_selected_indices_or_current()
+        if not targets:
+            messagebox.showwarning("Detect table", "No images selected.")
+            return
+
+        for idx in targets:
+            editor = self._ensure_editor(idx)
+            base = editor.get_base_image()
+            if base is None:
+                base = editor.get_current_image()
+            if base is None:
+                continue
+            img_np = np.array(base.convert("RGB"))
+            mask = PDFImageProcessor.detect_table_lines(img_np)
+            editor.set_table_mask(Image.fromarray(mask, mode="L"))
+
+        self.show_table_mask_var.set(True)
+        self._display_current_image()
+
+    def _detect_table_cells_selected(self):
+        """Compute table cells mask for all selected images (or current)."""
+        targets = self._get_selected_indices_or_current()
+        if not targets:
+            messagebox.showwarning("Detect table", "No images selected.")
+            return
+
+        for idx in targets:
+            editor = self._ensure_editor(idx)
+            base = editor.get_base_image()
+            if base is None:
+                base = editor.get_current_image()
+            if base is None:
+                continue
+            img_np = np.array(base.convert("RGB"))
+            cells = PDFImageProcessor.detect_table_cells_mask(img_np)
+            editor.set_table_cells_mask(Image.fromarray(cells, mode="L"))
+
+        self.show_table_cells_var.set(True)
+        self._display_current_image()
+
+    def _clear_table_mask_selected(self):
+        targets = self._get_selected_indices_or_current()
+        if not targets:
+            return
+        for idx in targets:
+            if idx in self.image_editors:
+                self.image_editors[idx].set_table_mask(None)
+        self._display_current_image()
+
+    def _clear_table_cells_mask_selected(self):
+        targets = self._get_selected_indices_or_current()
+        if not targets:
+            return
+        for idx in targets:
+            if idx in self.image_editors:
+                self.image_editors[idx].set_table_cells_mask(None)
+        self._display_current_image()
 
     # ----------------------------
     # Undo / Redo / History panel
@@ -1511,6 +1595,10 @@ class ImageManagementUI:
         if current_img is None:
             return
         display_img = current_img
+        if self.show_table_mask_var.get() and editor.table_mask is not None:
+            display_img = self._composite_table_mask(display_img, editor.table_mask)
+        if self.show_table_cells_var.get() and editor.table_cells_mask is not None:
+            display_img = self._composite_cells_mask(display_img, editor.table_cells_mask)
 
         # Preserve view: if we're refreshing the same page (e.g. brush stroke), don't reset.
         same_page = (self._viewer_current_index == self.current_index)
@@ -1561,7 +1649,32 @@ class ImageManagementUI:
             return
         self._view_state_by_index[self._viewer_current_index] = self.viewer.get_view_state()
 
-    # (Mask overlay helpers removed)
+    def _composite_table_mask(self, base_img: Image.Image, mask_l: Image.Image) -> Image.Image:
+        """
+        Overlay the line mask in semi-transparent red.
+        mask_l is expected to be 'L' 0..255 same size as base.
+        """
+        if mask_l.mode != "L":
+            mask_l = mask_l.convert("L")
+        if mask_l.size != base_img.size:
+            return base_img
+        base_rgba = base_img.convert("RGBA")
+        overlay = Image.new("RGBA", base_img.size, (255, 0, 0, 0))
+        alpha = mask_l.point(lambda p: int(p * 0.55))
+        overlay.putalpha(alpha)
+        return Image.alpha_composite(base_rgba, overlay).convert("RGB")
+
+    def _composite_cells_mask(self, base_img: Image.Image, mask_l: Image.Image) -> Image.Image:
+        """Overlay the cells mask in semi-transparent green."""
+        if mask_l.mode != "L":
+            mask_l = mask_l.convert("L")
+        if mask_l.size != base_img.size:
+            return base_img
+        base_rgba = base_img.convert("RGBA")
+        overlay = Image.new("RGBA", base_img.size, (0, 255, 0, 0))
+        alpha = mask_l.point(lambda p: int(p * 0.35))
+        overlay.putalpha(alpha)
+        return Image.alpha_composite(base_rgba, overlay).convert("RGB")
     
     def _rotate(self, angle: float):
         """Rotate current image."""
